@@ -57,7 +57,7 @@ def test_microcompact_preserves_recent():
 
     preserved_count = sum(
         1 for b in tool_results
-        if b.get("content") != "[Output compacted - re-read if needed]"
+        if b.get("content") != "[Old tool result content cleared]"
     )
     assert preserved_count >= cm.KEEP_RECENT, \
         f"Should preserve at least {cm.KEEP_RECENT} recent results, got {preserved_count}"
@@ -83,7 +83,7 @@ def test_microcompact_replaces_old():
     user_content = messages[1]["content"]
     compacted = [
         b for b in user_content
-        if b.get("content") == "[Output compacted - re-read if needed]"
+        if b.get("content") == "[Old tool result content cleared]"
     ]
     assert len(compacted) > 0, "Old tool results should be compacted"
     assert len(compacted) == 2, f"Expected 2 compacted (5 - KEEP_RECENT=3), got {len(compacted)}"
@@ -109,7 +109,7 @@ def test_microcompact_skips_small():
     user_content = messages[1]["content"]
     compacted = [
         b for b in user_content
-        if b.get("content") == "[Output compacted - re-read if needed]"
+        if b.get("content") == "[Old tool result content cleared]"
     ]
     assert len(compacted) == 0, "Small outputs (under token threshold) should never be compacted"
     print("PASS: test_microcompact_skips_small")
@@ -316,7 +316,7 @@ def test_microcompact_only_compactable_tools():
 
     messages = cm.microcompact(messages)
 
-    compacted_marker = "[Output compacted - re-read if needed]"
+    compacted_marker = "[Old tool result content cleared]"
     user_blocks = messages[1]["content"]
 
     # All 10 are compactable. KEEP_RECENT=3, so 7 should be compacted.

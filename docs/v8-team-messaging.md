@@ -4,28 +4,12 @@
 
 v3 subagents are "divide and conquer": the main agent dispatches a task, the subagent executes, returns a result, and is destroyed. For tasks like "develop frontend and backend simultaneously," subagents are not enough: they cannot communicate with each other, cannot share progress, and are destroyed after execution.
 
-## Five Conceptual Layers
+v8 is built in three phases, each adding a layer of collaboration:
 
 ```sh
-+---------------------------------------------------------------+
-|  Layer 5: Team Lifecycle                                      |
-|    TeamCreate -> spawn teammates -> TeamDelete                 |
-+---------------------------------------------------------------+
-|  Layer 4: Message Protocol                                    |
-|    message | broadcast | shutdown_request |                    |
-|    shutdown_response | plan_approval_response                  |
-+---------------------------------------------------------------+
-|  Layer 3: Inbox System                                        |
-|    .teams/{team}/{name}_inbox.jsonl                            |
-|    Atomic lock files, read-and-clear pattern                   |
-+---------------------------------------------------------------+
-|  Layer 2: Teammate Execution                                  |
-|    Daemon thread per teammate, own agent loop                  |
-|    TEAMMATE_TOOLS = BASE_TOOLS + task CRUD + SendMessage       |
-+---------------------------------------------------------------+
-|  Layer 1: Shared State                                        |
-|    Tasks (v6) on disk, Background (v7) notifications           |
-+---------------------------------------------------------------+
+v8a: Team Foundation    - persistent teammates with lifecycle
+v8b: Messaging          - file-based inboxes, 5 message types
+v8c: Coordination       - shared task board, shutdown protocol, plan approval
 ```
 
 ## Subagent vs Teammate
@@ -40,7 +24,7 @@ v3 subagents are "divide and conquer": the main agent dispatches a task, the sub
 
 ---
 
-## Section A: Team Infrastructure
+## Phase A: Team Foundation (v8a)
 
 ### Architecture
 
@@ -50,29 +34,12 @@ Team Lead (main agent)
   |-- Teammate: backend    (daemon thread)
   +-- Shared:
         |-- .tasks/         <- everyone sees the same board
-        +-- .teams/         <- JSONL inbox files per teammate
+        +-- .teams/         <- team config files
+              +-- {team_name}/
+                    +-- config.json  <- team metadata and member list
 ```
 
 Each Teammate runs as a daemon thread with its own agent loop, its own context window, and runs compression (v5) independently.
-
-### TeammateManager
-
-```python
-class TeammateManager:
-    MESSAGE_TYPES = {
-        "message", "broadcast", "shutdown_request",
-        "shutdown_response", "plan_approval_response",
-    }
-
-    def __init__(self):
-        self._teams: dict[str, dict[str, Teammate]] = {}
-        self._lock = threading.Lock()
-```
-
-Three operations form the team lifecycle:
-1. `create_team(name)` -- register a new team, create its directory
-2. `spawn_teammate(name, team_name, prompt)` -- start a teammate thread
-3. `delete_team(name)` -- send shutdown to all members, remove team
 
 ### Teammate Data Model
 
@@ -86,25 +53,62 @@ class Teammate:
     thread: threading.Thread
     inbox_path: Path         # .teams/{team_name}/{name}_inbox.jsonl
     color: str = ""          # ANSI color for terminal output
+
+    def __post_init__(self):
+        if not self.agent_id:
+            self.agent_id = f"{self.name}@{self.team_name}"
 ```
 
 The `agent_id` uses `name@team_name` (e.g. `backend@rest-to-graphql`) for identification.
 
-### Team Directory Structure
+### TeammateManager
+
+```python
+class TeammateManager:
+    def __init__(self):
+        self._teams: dict[str, dict[str, Teammate]] = {}
+        self._lock = threading.Lock()
+```
+
+Three operations form the team lifecycle:
+1. `create_team(name)` -- register a new team, create its directory and config.json
+2. `spawn_teammate(name, team_name, prompt)` -- start a teammate thread
+3. `delete_team(name)` -- send shutdown to all members, remove team
+
+### v8a Teammate Loop (Foundation)
+
+In v8a, the teammate loop is the simplest form: run the tool loop until done, then shut down. No inbox, no messaging:
 
 ```sh
-.teams/
-  rest-to-graphql/
-    config.json             <- team metadata and member list
-    frontend_inbox.jsonl    <- frontend teammate's inbox
-    frontend_inbox.lock     <- lock file for atomic writes
-    backend_inbox.jsonl     <- backend teammate's inbox
-    backend_inbox.lock
+v8a teammate:  spawn -> work (tool loop) -> shutdown (silent)
 ```
+
+### TEAMMATE_TOOLS vs ALL_TOOLS
+
+| Tool | Team Lead | Teammate |
+|------|-----------|----------|
+| bash, read_file, write_file, edit_file | Yes | Yes |
+| TaskCreate, TaskGet, TaskUpdate, TaskList | Yes | Yes |
+| SendMessage | Yes | Placeholder |
+| Task (spawn subagents/teammates) | Yes | No |
+| Skill | Yes | No |
+| TaskOutput, TaskStop | Yes | No |
+| TeamCreate, TeamDelete | Yes | No |
+
+Teammates get base tools + task CRUD -- enough to do work, but not enough to spawn agents or manage the team.
+
+### Task Tool: Three Modes
+
+The same Task tool now has three modes:
+1. No extra params -- synchronous subagent (v3)
+2. `run_in_background=True` -- background subagent (v7)
+3. `team_name + name` -- persistent teammate (v8)
 
 ---
 
-## Section B: Message Protocol
+## Phase B: Messaging (v8b)
+
+v8b adds the inbox system so teammates can communicate.
 
 ### Message Types
 
@@ -116,13 +120,12 @@ The `agent_id` uses `name@team_name` (e.g. `backend@rest-to-graphql`) for identi
 | `shutdown_response` | "I have wrapped up" | Teammate -> Lead |
 | `plan_approval_response` | "Your refactoring plan is approved" | Lead -> Teammate |
 
-Messages are delivered as `<teammate-message>` XML when injected into the teammate's conversation:
-
-```xml
-<teammate-message teammate_id="{sender}" summary="{summary}">
-{message text}
-</teammate-message>
+```python
+MESSAGE_TYPES = {"message", "broadcast", "shutdown_request",
+                 "shutdown_response", "plan_approval_response"}
 ```
+
+SendMessage requires a `summary` field (5-10 word preview) for message and broadcast types. This mirrors production behavior where summaries appear in the UI notification panel.
 
 ### Inbox Architecture
 
@@ -149,13 +152,25 @@ Team Lead                                  config.json
 +-----------+
 ```
 
+### Team Directory Structure
+
+```sh
+.teams/
+  rest-to-graphql/
+    config.json             <- team metadata and member list
+    frontend_inbox.jsonl    <- frontend teammate's inbox
+    frontend_inbox.lock     <- lock file for atomic writes
+    backend_inbox.jsonl     <- backend teammate's inbox
+    backend_inbox.lock
+```
+
 ### JSONL Inbox File Format
 
 Each teammate has a dedicated inbox file at `.teams/{team_name}/{name}_inbox.jsonl`:
 
 ```json
-{"type": "message", "sender": "lead", "content": "Please finish the login page first", "timestamp": 1709234567.89}
-{"type": "broadcast", "sender": "backend", "content": "API schema is finalized", "timestamp": 1709234590.12}
+{"type": "message", "sender": "lead", "content": "Please finish the login page first", "summary": "prioritize login page", "timestamp": 1709234567.89}
+{"type": "broadcast", "sender": "backend", "content": "API schema is finalized", "summary": "API schema finalized", "timestamp": 1709234590.12}
 ```
 
 Reading the inbox consumes all messages and clears the file (read-and-clear pattern).
@@ -183,34 +198,91 @@ def _write_to_inbox(inbox_path, message):
 
 Both `_write_to_inbox` and `check_inbox` use this lock file pattern to prevent race conditions between concurrent reads and writes.
 
+### v8b Teammate Loop (with Inbox)
+
+```sh
+v8b teammate:  spawn -> work (check inbox each turn) -> shutdown
+```
+
+The teammate checks its inbox before each API call. Messages are delivered as `<teammate-message>` XML when injected into the teammate's conversation:
+
+```sh
+<teammate-message teammate_id="{sender}" summary="{summary}">
+{message text}
+</teammate-message>
+```
+
 ---
 
-## Section C: Teammate Loop
+## Phase C: Coordination (v8c)
 
-### TEAMMATE_TOOLS vs ALL_TOOLS
+v8c adds the coordination layer: shared task board, shutdown protocol with request_id, plan approval, and teammate status tracking.
 
-| Tool | Team Lead | Teammate |
-|------|-----------|----------|
-| bash, read_file, write_file, edit_file | Yes | Yes |
-| TaskCreate, TaskGet, TaskUpdate, TaskList | Yes | Yes |
-| SendMessage | Yes | Yes |
-| Task (spawn subagents/teammates) | Yes | No |
-| Skill | Yes | No |
-| TaskOutput, TaskStop | Yes | No |
-| TeamCreate, TeamDelete | Yes | No |
+### Shared Task Board
 
-Teammates get 9 tools (4 BASE + 4 task CRUD + SendMessage) -- enough to do work and communicate, but not enough to spawn agents or manage the team.
+```sh
+Team Lead                     Shared Task Board (.tasks/)
++-----------+                 +---------------------+
+| TaskCreate|+--------------->| 1.json              |
++-----------+                 | 2.json              |
+                              | 3.json              |
+Teammate A                    +-----^-----+---------+
++-----------+                       |     |
+| TaskGet   |+----------------------+     |
+| TaskUpdate|+----------------------------+
++-----------+
 
-### Task Tool: Three Modes
+Teammate B
++-----------+
+| TaskList  |+--- reads same board
+| TaskUpdate|+--- writes same board
++-----------+
+```
 
-The same Task tool now has three modes:
-1. No extra params -- synchronous subagent (v3)
-2. `run_in_background=True` -- background subagent (v7)
-3. `team_name + name` -- persistent teammate (v8)
+All teammates share the same `.tasks/` directory. Task CRUD operations are thread-safe via the TaskManager's locking.
 
-### Teammate Work Loop
+### Shutdown Protocol (with request_id)
 
-In v8, the teammate loop is straightforward: receive a prompt, work until done, then shut down. No idle cycle or auto-claiming -- those are v9. The inbox is polled at 1-second intervals (matching cli.js cZz=1000ms).
+```sh
+Lead                          Teammate
++--------+                    +--------+
+| send   |  shutdown_request  |        |
+| msg    +---(request_id)---->| check  |
++--------+                    | inbox  |
+                              +---+----+
+                                  |
+                                  v
+                              handle: set status="shutdown"
+                              respond with request_id
+```
+
+The shutdown protocol uses `request_id` for reliable handoff:
+1. Team Lead sends `shutdown_request` with a `request_id` via `SendMessage`
+2. Message written to the teammate's JSONL inbox
+3. Teammate reads `shutdown_request` on next inbox check
+4. Teammate responds with `shutdown_response` echoing the `request_id`
+5. Teammate exits its loop
+
+### Plan Approval Flow
+
+```sh
+Teammate sends plan -> Lead reviews -> plan_approval_response
+-> Teammate receives approval/rejection with feedback
+```
+
+Plan approval is a structured message type, not a tool call.
+
+### Teammate Status Tracking
+
+```sh
+active   - currently executing tool calls
+idle     - no current work (v9 adds idle polling)
+shutdown - gracefully exiting
+```
+
+Status is tracked per-teammate and persisted in config.json.
+
+### v8c Teammate Loop (Full)
 
 ```python
 def _teammate_loop(self, teammate, initial_prompt):
@@ -248,9 +320,7 @@ def _teammate_loop(self, teammate, initial_prompt):
 
 ---
 
-## Section D: Full Lifecycle
-
-### End-to-End Walkthrough
+## Full Lifecycle Walkthrough
 
 ```sh
 1. TeamCreate("rest-to-graphql")
@@ -264,7 +334,7 @@ def _teammate_loop(self, teammate, initial_prompt):
 3. Task(prompt="Handle backend", team_name="rest-to-graphql", name="backend")
    -> Second teammate spawned
 
-4. SendMessage(recipient="frontend", content="Use the new API schema")
+4. SendMessage(recipient="frontend", content="Use the new API schema", summary="use new API schema")
    -> Message written to frontend_inbox.jsonl (with lock)
 
 5. Frontend teammate's loop:
@@ -272,7 +342,7 @@ def _teammate_loop(self, teammate, initial_prompt):
    -> Message injected as <teammate-message> XML
    -> Teammate processes and continues working
 
-6. SendMessage(type="broadcast", content="Schema finalized")
+6. SendMessage(type="broadcast", content="Schema finalized", summary="schema finalized")
    -> Written to ALL teammate inboxes
 
 7. TeamDelete("rest-to-graphql")
@@ -281,13 +351,30 @@ def _teammate_loop(self, teammate, initial_prompt):
    -> Team removed from registry
 ```
 
-### Shutdown Protocol
+## Five Conceptual Layers
 
-1. Team Lead sends `shutdown_request` via `SendMessage`
-2. Message written to the teammate's JSONL inbox
-3. Teammate reads `shutdown_request` on next inbox check
-4. Teammate exits its loop
-5. `TeamDelete` sends shutdown to all teammates, then removes the team
+```sh
++---------------------------------------------------------------+
+|  Layer 5: Team Lifecycle                                      |
+|    TeamCreate -> spawn teammates -> TeamDelete                 |
++---------------------------------------------------------------+
+|  Layer 4: Message Protocol                                    |
+|    message | broadcast | shutdown_request |                    |
+|    shutdown_response | plan_approval_response                  |
+|    (each with summary field + optional request_id)             |
++---------------------------------------------------------------+
+|  Layer 3: Inbox System                                        |
+|    .teams/{team}/{name}_inbox.jsonl                            |
+|    Atomic lock files, read-and-clear pattern                   |
++---------------------------------------------------------------+
+|  Layer 2: Teammate Execution                                  |
+|    Daemon thread per teammate, own agent loop                  |
+|    TEAMMATE_TOOLS = BASE_TOOLS + task CRUD + SendMessage       |
++---------------------------------------------------------------+
+|  Layer 1: Shared State                                        |
+|    Tasks (v6) on disk, Background (v7) notifications           |
++---------------------------------------------------------------+
+```
 
 ## The Deeper Insight
 

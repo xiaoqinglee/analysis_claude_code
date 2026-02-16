@@ -70,7 +70,7 @@ def chat(prompt, history=None):
             if block.type == "tool_use":
                 out = subprocess.run(
                     block.input["command"], shell=True,
-                    capture_output=True, text=True, timeout=300, cwd=os.getcwd()
+                    capture_output=True, text=True, timeout=120, cwd=os.getcwd()
                 )
                 results.append({
                     "type": "tool_result",
@@ -80,7 +80,7 @@ def chat(prompt, history=None):
         history.append({"role": "user", "content": results})
 ```
 
-Key parameters: `timeout=300` seconds per command, output truncated to 50000 characters.
+Key parameters: `timeout=120` seconds per command (production default, max 600s), output truncated to 50000 characters.
 
 ## Subagent via Self-Recursion
 

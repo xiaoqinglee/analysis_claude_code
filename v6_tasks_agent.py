@@ -133,8 +133,15 @@ class TaskManager:
         base_dir = tasks_dir or TASKS_DIR
         self.tasks_dir = base_dir / list_id if list_id != "default" else base_dir
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
+        # In-process threading.Lock for teaching simplicity. Production cli.js
+        # uses file-based locks (proper-lockfile) for cross-process safety.
         self._lock = threading.Lock()
         self._counter = self._load_counter()
+
+    @staticmethod
+    def _sanitize_id(task_id: str) -> str:
+        """Sanitize task ID for filename: replace non-alphanumeric (except _ and -) with -."""
+        return re.sub(r'[^a-zA-Z0-9_-]', '-', str(task_id))
 
     def _load_counter(self) -> int:
         """Load next task ID from highwatermark file, falling back to file scan."""
@@ -144,14 +151,14 @@ class TaskManager:
                 return int(hwm_path.read_text().strip()) + 1
             except ValueError:
                 pass
-        existing = list(self.tasks_dir.glob("task_*.json"))
+        existing = list(self.tasks_dir.glob("*.json"))
         if not existing:
             return 1
         ids = []
         for f in existing:
             try:
-                ids.append(int(f.stem.split("_")[1]))
-            except (ValueError, IndexError):
+                ids.append(int(f.stem))
+            except ValueError:
                 pass
         return max(ids) + 1 if ids else 1
 
@@ -164,7 +171,7 @@ class TaskManager:
         return task_id
 
     def _task_path(self, task_id: str) -> Path:
-        return self.tasks_dir / f"task_{task_id}.json"
+        return self.tasks_dir / f"{self._sanitize_id(task_id)}.json"
 
     def _save_task(self, task: Task):
         data = asdict(task)
@@ -245,7 +252,7 @@ class TaskManager:
 
     def _clear_dependency(self, completed_id: str):
         """When a task completes, remove it from all blocked_by lists."""
-        for path in self.tasks_dir.glob("task_*.json"):
+        for path in self.tasks_dir.glob("*.json"):
             try:
                 data = json.loads(path.read_text())
                 if completed_id in data.get("blocked_by", []):
@@ -257,7 +264,7 @@ class TaskManager:
     def list_all(self) -> list:
         """List all tasks with summary info."""
         tasks = []
-        for path in sorted(self.tasks_dir.glob("task_*.json")):
+        for path in sorted(self.tasks_dir.glob("*.json")):
             try:
                 data = json.loads(path.read_text())
                 tasks.append(Task(**data))
@@ -307,7 +314,8 @@ class ContextManager:
     - Disk transcript = long-term memory archive
     """
 
-    COMPACTABLE_TOOLS = {"bash", "read_file", "write_file", "edit_file"}
+    # Matches cli.js $UY set of compactable tool types
+    COMPACTABLE_TOOLS = {"bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "notebook_edit"}
     KEEP_RECENT = 3
     TOKEN_THRESHOLD = auto_compact_threshold()
     MAX_OUTPUT_TOKENS = 40000
@@ -319,6 +327,8 @@ class ContextManager:
     @staticmethod
     def estimate_tokens(text: str) -> int:
         # cli.js H2: Math.round(A.length / q) with default divisor q=4
+        # Production cli.js also applies a 1.333x multiplier (Wp1) for
+        # message-level counting. Omitted here for teaching clarity.
         return len(text) // 4
 
     def microcompact(self, messages: list) -> list:
@@ -327,6 +337,7 @@ class ContextManager:
 
         Keeps the tool call structure intact - the model still knows WHAT
         it called, just can't see the old output. It can re-read if needed.
+        Only applies clearing if total estimated savings >= MIN_SAVINGS.
         """
         tool_result_indices = []
 
@@ -345,35 +356,39 @@ class ContextManager:
         # Keep only the most recent KEEP_RECENT, compact the rest
         to_compact = tool_result_indices[:-self.KEEP_RECENT] if len(tool_result_indices) > self.KEEP_RECENT else []
 
+        # Estimate total savings before clearing; skip if below threshold
+        estimated_savings = 0
+        clearable = []
         for i, j, block in to_compact:
             content_str = block.get("content", "")
             if isinstance(content_str, str) and self.estimate_tokens(content_str) > 1000:
-                block["content"] = "[Output compacted - re-read if needed]"
+                estimated_savings += self.estimate_tokens(content_str)
+                clearable.append(block)
+
+        if estimated_savings >= MIN_SAVINGS:
+            for block in clearable:
+                # Matches cli.js wJA replacement string
+                block["content"] = "[Old tool result content cleared]"
 
         return messages
 
     def should_compact(self, messages: list) -> bool:
-        """Check if context is approaching the window limit.
-        Skips compaction if estimated savings are below MIN_SAVINGS."""
+        """Check if context is approaching the window limit."""
         total = sum(self.estimate_tokens(json.dumps(m, default=str)) for m in messages)
-        if total <= self.TOKEN_THRESHOLD:
-            return False
-        # Only compact if we'd save meaningful tokens (recent 5 messages kept)
-        recent_size = sum(
-            self.estimate_tokens(json.dumps(m, default=str))
-            for m in messages[-5:]
-        ) if len(messages) > 5 else total
-        savings = total - recent_size
-        return savings >= MIN_SAVINGS
+        return total > self.TOKEN_THRESHOLD
 
     def auto_compact(self, messages: list) -> list:
         """
-        Layer 2: Summarize entire conversation, preserving recent context.
+        Layer 2: Summarize entire conversation, replace ALL messages.
+
+        Production cli.js auto_compact replaces the ENTIRE message list with:
+        [user_summary_message, assistant_ack, ...restored_file_messages].
+        There is no "keep last N messages" behavior in auto_compact.
+        Only manual /compact can optionally preserve messages.
 
         1. Save full transcript to disk (never lose data)
         2. Call model to generate chronological summary
-        3. Replace old messages with summary, keep recent 5
-        4. Restore recently-read files within token limits
+        3. Replace all messages with summary + restored files
         """
         self.save_transcript(messages)
 
@@ -394,8 +409,7 @@ class ContextManager:
 
         summary = summary_response.content[0].text
 
-        # Inject summary as user message (preserves system prompt cache)
-        recent = messages[-5:] if len(messages) > 5 else messages[-2:]
+        # Replace ALL messages with summary + restored files (no "keep last N")
         result = [
             {"role": "user", "content": f"[Conversation compressed]\n\n{summary}"},
             {"role": "assistant", "content": "Understood. I have the context from the compressed conversation. Continuing work."},
@@ -404,7 +418,6 @@ class ContextManager:
         for rf in restored_files:
             result.append(rf)
             result.append({"role": "assistant", "content": "Noted, file content restored."})
-        result.extend(recent)
         return result
 
     def handle_large_output(self, output: str) -> str:
@@ -794,7 +807,7 @@ def run_bash(cmd: str) -> str:
     if any(d in cmd for d in ["rm -rf /", "sudo", "shutdown"]):
         return "Error: Dangerous command"
     try:
-        r = subprocess.run(cmd, shell=True, cwd=WORKDIR, capture_output=True, text=True, timeout=60)
+        r = subprocess.run(cmd, shell=True, cwd=WORKDIR, capture_output=True, text=True, timeout=120)
         return ((r.stdout + r.stderr).strip() or "(no output)")[:50000]
     except Exception as e:
         return f"Error: {e}"
@@ -860,6 +873,8 @@ def run_task_get(task_id: str) -> str:
 
 
 def run_task_update(task_id: str, **kwargs) -> str:
+    # status="deleted" triggers file removal (production cli.js deletes the file entirely).
+    # The stored Task schema only has: pending, in_progress, completed.
     if kwargs.get("status") == "deleted":
         if TASK_MGR.delete(task_id):
             return f"Task {task_id} deleted"

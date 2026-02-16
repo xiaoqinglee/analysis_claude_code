@@ -1,71 +1,61 @@
 #!/usr/bin/env python3
 """
-v7_background_agent.py - Mini Claude Code: Background Execution & Notification Bus (~1000 lines)
+v8a_team_foundation.py - Mini Claude Code: From Commands to Collaboration - Team Foundation (~1150 lines)
 
-Core Philosophy: "Fire and Forget, Get Notified When Done"
-===========================================================
-v0-v6 agents are synchronous: they launch a subagent (v3) and block until
-it completes. For one task that's fine. For three parallel tasks? Disaster.
+Core Philosophy: "From Commands to Collaboration"
+===================================================
+v3 gave us subagents: spawn, execute, return, destroy. Like dispatching interns.
+v7 gave us background execution: do multiple things at once without blocking.
 
-    v6 (blocking):
-      Agent ----[spawn A]----[wait...]----[wait...]----[result A]----
-                                  ^ This time is wasted
+v8a introduces teams: the foundation for persistent agents that share a
+workspace. Unlike one-shot subagents, teammates have identity, belong to
+a named team, and persist beyond a single prompt -- but in this version
+they shut down once they run out of tool calls to make.
 
-    v7 (non-blocking):
-      Agent ----[spawn A]----[spawn B]----[spawn C]----[other work]----
-                   |              |            |
-                   v              v            v
-                [A runs]      [B runs]     [C runs]      (parallel)
-                   |              |            |
-                   +-- notification bus ---->  [Agent gets results]
+    Subagent lifecycle:  spawn -> execute -> return -> destroyed
+    Teammate lifecycle:  spawn -> work (tool loop) -> finish -> shutdown
 
-    NOTIFICATION BUS PIPELINE
-    =========================
+    TEAM FOUNDATION ARCHITECTURE
+    =============================
 
-    Background thread              Main thread
-    +-----------------+            +-------------------+
-    | task executes   |            | agent loop        |
-    | ...             |            | waiting for LLM   |
-    | task completes  |            |                   |
-    +--------+--------+            +-------------------+
-             |                              ^
-             v                              |
-    +------------------+           +--------+--------+
-    | enqueue(notify)  |           | drain_notifs()  |
-    | attachment fmt:  |           | inject into     |
-    | {type:attachment |           | user message    |
-    |  attachment:{    |           | as attachment   |
-    |    type:task_..  |           | object          |
-    |    task_id:...   |           +-----------------+
-    |    status:...    |
-    |    summary:...}} |
-    +--------+---------+
-             |
-             v
-    +------------------+
-    | notification     |
-    | queue (thread-   |
-    | safe Queue)      |
-    +------------------+
+    Team Lead (main loop)
+    +-----------+
+    | create_   |
+    | team()    +--------> .teams/{name}/config.json
+    +-----+-----+         {name, description, createdAt,
+          |                leadAgentId, members[]}
+          v
+    +-----------+
+    | spawn_    |          Teammate thread
+    | teammate()+--------> +-----------+
+    +-----------+          | tool loop |
+                           | (no inbox |
+                           |  yet)     |
+                           +-----+-----+
+                                 |
+                                 | stop_reason != tool_use
+                                 v
+                           +-----------+
+                           | shutdown  |
+                           +-----------+
 
-Two new mechanisms make this work:
+    TOOL SCOPING
+    ============
+    Lead gets:    ALL_TOOLS (base + subagents + skills + tasks + team mgmt)
+    Teammate gets: TEAMMATE_TOOLS (base + task CRUD + SendMessage placeholder)
+    Subagent gets: type-filtered BASE_TOOLS only
 
-    BackgroundManager   Thread-based parallel execution. Bash commands
-                        and subagents run in daemon threads. Each gets
-                        a unique ID (b=bash, a=agent). Results are
-                        collected via get_output() or drain_notifications().
+Key design details:
+    - Agent IDs use format {name}@{teamName} for unique identification
+    - config.json persists team structure under .teams/{name}/
+    - TeammateManager handles create/spawn/delete lifecycle
+    - _teammate_loop: accept prompt, run tool loop, shutdown when done
 
-    Notification Bus    When a background task completes, it pushes an
-                        attachment-formatted notification to a Queue. Before
-                        each API call, the main loop drains the queue and
-                        injects notifications as attachment objects in user
-                        messages, matching cli.js's attachment pipeline.
-
-This is the INFRASTRUCTURE layer. v8 builds on it to add persistent
-teammates that run as background threads with their own agent loops.
+v8b adds: file-based inbox messaging between teammates
+v8c adds: shared task board coordination, shutdown protocol
 
 Usage:
-    python v7_background_agent.py
+    python v8a_team_foundation.py
 """
 
 import json
@@ -90,6 +80,8 @@ load_dotenv(override=True)
 # Configuration
 # =============================================================================
 
+# When using third-party endpoints (e.g. GLM), clear ANTHROPIC_AUTH_TOKEN
+# to prevent the SDK from sending a conflicting authorization header.
 if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
@@ -97,10 +89,243 @@ WORKDIR = Path.cwd()
 SKILLS_DIR = WORKDIR / "skills"
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 TASKS_DIR = WORKDIR / ".tasks"
+# cli.js stores team config at ~/.claude/teams/{name}/config.json;
+# we use a local .teams/ directory for educational simplicity.
+TEAMS_DIR = WORKDIR / ".teams"
 OUTPUT_DIR = WORKDIR / ".task_outputs"
+
+# Notification modes that should not be editable by the model
+NON_EDITABLE_MODES = {"task-notification"}
 
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.getenv("MODEL_ID", "claude-sonnet-4-5-20250929")
+
+
+def is_editable(mode: str) -> bool:
+    """Check whether a notification mode allows the model to edit its content."""
+    return mode not in NON_EDITABLE_MODES
+
+
+# =============================================================================
+# TeammateManager
+# =============================================================================
+
+# ANSI colors for teammate output (cycles through for visual distinction)
+TEAMMATE_COLORS = [
+    "\033[36m",   # cyan
+    "\033[33m",   # yellow
+    "\033[35m",   # magenta
+    "\033[32m",   # green
+    "\033[34m",   # blue
+]
+COLOR_RESET = "\033[0m"
+
+
+@dataclass
+class Teammate:
+    name: str
+    team_name: str
+    agent_id: str = ""
+    status: str = "active"
+    thread: threading.Thread = field(default=None, repr=False)
+    inbox_path: Path = field(default=None)
+    color: str = ""
+
+    def __post_init__(self):
+        if not self.agent_id:
+            self.agent_id = f"{self.name}@{self.team_name}"
+
+
+class TeammateManager:
+    """
+    Manages persistent agent teammates that work independently.
+
+    Each teammate runs in its own thread with its own agent loop.
+    In this foundation version, teammates only execute tool calls
+    from their initial prompt and shut down when done. No inbox
+    messaging yet -- that comes in v8b.
+
+    TEAMMATE_TOOLS scope: BASE_TOOLS + task CRUD
+    In production, tools would be filtered per agent_type.
+    """
+
+    def __init__(self):
+        self._teams: dict[str, dict[str, Teammate]] = {}
+        self._lock = threading.Lock()
+        TEAMS_DIR.mkdir(exist_ok=True)
+
+    def create_team(self, name: str, description: str = "", lead_agent_id: str = "lead") -> str:
+        with self._lock:
+            if name in self._teams:
+                return f"Team '{name}' already exists"
+            self._teams[name] = {}
+            team_dir = TEAMS_DIR / name
+            team_dir.mkdir(exist_ok=True)
+            config_path = team_dir / "config.json"
+            config_path.write_text(json.dumps({
+                "name": name,
+                "description": description,
+                "createdAt": time.time(),
+                "leadAgentId": lead_agent_id,
+                "members": [],
+            }, indent=2))
+            return f"Team '{name}' created"
+
+    def spawn_teammate(self, name: str, team_name: str, prompt: str) -> str:
+        """Spawn a persistent teammate that runs its own agent loop."""
+        with self._lock:
+            if team_name not in self._teams:
+                return f"Error: Team '{team_name}' not found"
+            if name in self._teams[team_name]:
+                return f"Error: Teammate '{name}' already exists in team '{team_name}'"
+
+            color_idx = len(self._teams[team_name]) % len(TEAMMATE_COLORS)
+            inbox_path = TEAMS_DIR / team_name / f"{name}_inbox.jsonl"
+            teammate = Teammate(
+                name=name,
+                team_name=team_name,
+                inbox_path=inbox_path,
+                color=TEAMMATE_COLORS[color_idx],
+            )
+
+            def run():
+                self._teammate_loop(teammate, prompt)
+
+            thread = threading.Thread(target=run, daemon=True)
+            teammate.thread = thread
+            self._teams[team_name][name] = teammate
+            self._update_team_config(team_name)
+            thread.start()
+
+            return json.dumps({
+                "name": name,
+                "team": team_name,
+                "agent_id": teammate.agent_id,
+                "status": "active",
+            })
+
+    def _update_team_config(self, team_name: str):
+        """Update config.json to reflect current team membership."""
+        team_dir = TEAMS_DIR / team_name
+        config_path = team_dir / "config.json"
+        config = {}
+        if config_path.exists():
+            try:
+                config = json.loads(config_path.read_text())
+            except json.JSONDecodeError:
+                pass
+        config["members"] = [
+            {
+                "name": tm.name,
+                "agentId": tm.agent_id,
+                "agentType": "teammate",
+                "joinedAt": time.time(),
+            }
+            for tm in self._teams.get(team_name, {}).values()
+        ]
+        config_path.write_text(json.dumps(config, indent=2))
+
+    def delete_team(self, name: str) -> str:
+        """Delete a team and mark all teammates as shutdown."""
+        with self._lock:
+            if name not in self._teams:
+                return f"Error: Team '{name}' not found"
+
+            team = self._teams[name]
+            for tm_name, teammate in team.items():
+                teammate.status = "shutdown"
+
+            del self._teams[name]
+            return f"Team '{name}' deleted, {len(team)} teammates notified"
+
+    def get_team_status(self, team_name: str = None) -> str:
+        """Get status of all teams or a specific team."""
+        with self._lock:
+            if team_name:
+                team = self._teams.get(team_name, {})
+                if not team:
+                    return f"Team '{team_name}' not found or empty"
+                lines = [f"Team: {team_name}"]
+                for name, tm in team.items():
+                    lines.append(f"  - {name}: {tm.status}")
+                return "\n".join(lines)
+
+            if not self._teams:
+                return "No teams."
+            lines = []
+            for tname, team in self._teams.items():
+                members = ", ".join(f"{n}({tm.status})" for n, tm in team.items())
+                lines.append(f"Team '{tname}': {members or 'empty'}")
+            return "\n".join(lines)
+
+    def _find_teammate(self, name: str, team_name: str = None) -> Teammate:
+        if team_name and team_name in self._teams:
+            return self._teams[team_name].get(name)
+        for team in self._teams.values():
+            if name in team:
+                return team[name]
+        return None
+
+    def _teammate_loop(self, teammate: Teammate, initial_prompt: str):
+        """
+        Basic teammate work cycle: receive prompt -> tool loop -> shutdown.
+
+        The teammate processes the initial prompt, executing tool calls until
+        the model decides to stop (stop_reason != tool_use), then exits.
+        No inbox, no idle phase -- those come in v8b and v8c.
+        """
+        color = teammate.color
+        reset = COLOR_RESET
+        prefix = f"{color}[{teammate.agent_id}]{reset}"
+
+        sub_system = f"""You are teammate '{teammate.name}' ({teammate.agent_id}) in team '{teammate.team_name}' at {WORKDIR}.
+
+Work on your assigned tasks. Use TaskList to find tasks.
+Use TaskGet to read task details before starting work.
+Use TaskUpdate to mark progress.
+Complete work efficiently and report results clearly."""
+
+        # In this foundation version, teammates get base tools + task CRUD only.
+        # In production, tools would be filtered per agent_type.
+        sub_tools = _get_teammate_tools()
+        sub_messages = [{"role": "user", "content": initial_prompt}]
+
+        while teammate.status != "shutdown":
+            teammate.status = "active"
+
+            try:
+                sub_messages = CTX.microcompact(sub_messages)
+                if CTX.should_compact(sub_messages):
+                    sub_messages = CTX.auto_compact(sub_messages)
+
+                response = client.messages.create(
+                    model=MODEL, system=sub_system,
+                    messages=sub_messages, tools=sub_tools, max_tokens=8000,
+                )
+
+                if response.stop_reason == "tool_use":
+                    tool_calls = [b for b in response.content if b.type == "tool_use"]
+                    results = []
+                    for tc in tool_calls:
+                        output = execute_tool(tc.name, tc.input)
+                        output = CTX.handle_large_output(output)
+                        results.append({"type": "tool_result", "tool_use_id": tc.id, "content": output})
+                    sub_messages.append({"role": "assistant", "content": response.content})
+                    sub_messages.append({"role": "user", "content": results})
+                    continue
+                else:
+                    # No more tool calls -- teammate work is done
+                    teammate.status = "shutdown"
+                    self._update_team_config(teammate.team_name)
+                    return
+
+            except Exception as e:
+                teammate.status = "shutdown"
+                self._update_team_config(teammate.team_name)
+                return
+
+
+TEAM_MGR = TeammateManager()
 
 
 # =============================================================================
@@ -119,11 +344,12 @@ class BackgroundTask:
 
 class BackgroundManager:
     """
-    Manages background execution of bash commands and subagents.
+    Manages background execution of bash commands, subagents, and teammates.
 
     ID prefixes indicate type:
         b = bash command
         a = local agent (subagent)
+        t = teammate
 
     When a background task completes, a notification is pushed to
     the notification queue. The main agent loop drains this queue
@@ -134,25 +360,21 @@ class BackgroundManager:
         self._tasks: dict[str, BackgroundTask] = {}
         self._notifications: Queue = Queue()
         self._lock = threading.Lock()
-        # cli.js jSA=32000 default, configurable up to 160000 via TASK_MAX_OUTPUT_LENGTH env var
-        self.max_output_chars = int(os.getenv("TASK_MAX_OUTPUT_LENGTH", "32000"))
         OUTPUT_DIR.mkdir(exist_ok=True)
 
     def _gen_id(self, prefix: str) -> str:
         return f"{prefix}{uuid.uuid4().hex[:6]}"
 
     def _write_output(self, task_id: str, content: str) -> Path:
-        """Write task output to an append-only file. Returns the file path.
-        Extension is .output to match cli.js Hw() convention."""
-        path = OUTPUT_DIR / f"{task_id}.output"
-        truncated = content[:self.max_output_chars]
+        """Write task output to an append-only file. Returns the file path."""
+        path = OUTPUT_DIR / f"{task_id}.txt"
         with open(path, "a") as f:
-            f.write(truncated)
+            f.write(content)
         return path
 
     def read_output(self, task_id: str, offset: int = 0) -> str:
         """Read task output from file with optional byte offset."""
-        path = OUTPUT_DIR / f"{task_id}.output"
+        path = OUTPUT_DIR / f"{task_id}.txt"
         if not path.exists():
             return ""
         text = path.read_text()
@@ -160,10 +382,10 @@ class BackgroundManager:
 
     def run_in_background(self, func, task_type: str = "a") -> str:
         """
-        WR (write path): Run a function in a background thread.
+        Run a function in a background thread.
         Returns immediately with a task_id.
         """
-        prefix = {"bash": "b", "agent": "a"}.get(task_type, "a")
+        prefix = {"bash": "b", "agent": "a", "teammate": "t"}.get(task_type, "a")
         task_id = self._gen_id(prefix)
 
         bg_task = BackgroundTask(task_id=task_id, task_type=task_type)
@@ -177,20 +399,14 @@ class BackgroundManager:
                 bg_task.output = f"Error: {e}"
                 bg_task.status = "error"
             finally:
-                # Write output to persistent file
                 output_path = self._write_output(task_id, bg_task.output)
                 bg_task.event.set()
-                # Matches cli.js attachment pipeline for task notifications
                 self._notifications.put({
-                    "type": "attachment",
-                    "attachment": {
-                        "type": "task_status",
-                        "task_id": task_id,
-                        "task_type": bg_task.task_type,
-                        "status": bg_task.status,
-                        "summary": bg_task.output[:500],
-                        "output_file": str(output_path),
-                    },
+                    "task_id": task_id,
+                    "task_type": bg_task.task_type,
+                    "status": bg_task.status,
+                    "summary": bg_task.output[:500],
+                    "output_file": str(output_path),
                 })
 
         thread = threading.Thread(target=wrapper, daemon=True)
@@ -271,37 +487,30 @@ class TaskManager:
     File-based task management with dependency tracking.
 
     Each task is a JSON file in .tasks/ directory. Thread-level locking
-    ensures safety when multiple agents (lead, subagents) access the
-    same tasks concurrently.
+    ensures safety when multiple agents (lead, subagents, teammates)
+    access the same tasks concurrently.
     """
 
     def __init__(self, tasks_dir: Path = None):
         self.tasks_dir = tasks_dir or TASKS_DIR
         self.tasks_dir.mkdir(exist_ok=True)
-        # In-process threading.Lock for teaching simplicity. Production cli.js
-        # uses file-based locks (proper-lockfile) for cross-process safety.
         self._lock = threading.Lock()
         self._counter = self._load_counter()
 
     def _load_counter(self) -> int:
-        existing = list(self.tasks_dir.glob("*.json"))
+        existing = list(self.tasks_dir.glob("task_*.json"))
         if not existing:
             return 1
         ids = []
         for f in existing:
             try:
-                ids.append(int(f.stem))
-            except ValueError:
+                ids.append(int(f.stem.split("_")[1]))
+            except (ValueError, IndexError):
                 pass
         return max(ids) + 1 if ids else 1
 
-    @staticmethod
-    def _sanitize_id(task_id: str) -> str:
-        """Sanitize task ID for filename: replace non-alphanumeric (except _ and -) with -."""
-        return re.sub(r'[^a-zA-Z0-9_-]', '-', str(task_id))
-
     def _task_path(self, task_id: str) -> Path:
-        return self.tasks_dir / f"{self._sanitize_id(task_id)}.json"
+        return self.tasks_dir / f"task_{task_id}.json"
 
     def _save_task(self, task: Task):
         self._task_path(task.id).write_text(json.dumps(asdict(task), indent=2))
@@ -362,7 +571,7 @@ class TaskManager:
             return task
 
     def _clear_dependency(self, completed_id: str):
-        for path in self.tasks_dir.glob("*.json"):
+        for path in self.tasks_dir.glob("task_*.json"):
             try:
                 data = json.loads(path.read_text())
                 if completed_id in data.get("blocked_by", []):
@@ -373,7 +582,7 @@ class TaskManager:
 
     def list_all(self) -> list:
         tasks = []
-        for path in sorted(self.tasks_dir.glob("*.json")):
+        for path in sorted(self.tasks_dir.glob("task_*.json")):
             try:
                 tasks.append(Task(**json.loads(path.read_text())))
             except (json.JSONDecodeError, KeyError):
@@ -727,10 +936,10 @@ def get_agent_descriptions() -> str:
 
 
 # =============================================================================
-# System Prompt
+# System Prompt (team lead focused)
 # =============================================================================
 
-SYSTEM = f"""You are a coding agent at {WORKDIR}.
+SYSTEM = f"""You are a coding agent (Team Lead) at {WORKDIR}.
 
 Loop: plan -> act with tools -> report.
 
@@ -740,13 +949,18 @@ Loop: plan -> act with tools -> report.
 **Subagents available** (invoke with Task tool for focused subtasks):
 {get_agent_descriptions()}
 
-You can run tasks in background with run_in_background=true on Task or bash tools.
-When a background task completes, you'll receive an attachment notification with the result.
-Use TaskOutput to get full results. Use TaskStop to terminate a running task.
+**Team system (foundation):**
+- Use TeamCreate to form a team for persistent collaboration
+- Spawn teammates via Task with team_name + name parameters
+- Teammates work independently in background threads
+- Everyone shares the same task board (TaskCreate/TaskUpdate/TaskList)
+
+You can run tasks in background with run_in_background=true on Task/bash tools.
+Use TaskOutput to check results. Notifications arrive automatically when background tasks complete.
 
 Rules:
+- Use TeamCreate for tasks needing parallel collaboration
 - Use TaskCreate/TaskUpdate to track multi-step work
-- Set run_in_background=true for independent parallel work
 - Prefer tools over prose. Act, don't just explain.
 - After finishing, summarize what changed."""
 
@@ -768,7 +982,7 @@ BASE_TOOLS = [
 
 SUBAGENT_TOOL = {
     "name": "Task",
-    "description": f"Spawn a subagent for a focused subtask.\n\nAgent types:\n{get_agent_descriptions()}",
+    "description": f"Spawn a subagent or teammate.\n\nAgent types:\n{get_agent_descriptions()}\n\nAdd team_name + name to spawn a persistent teammate instead of a one-shot subagent.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -776,6 +990,8 @@ SUBAGENT_TOOL = {
             "prompt": {"type": "string", "description": "Detailed instructions"},
             "agent_type": {"type": "string", "enum": list(AGENT_TYPES.keys())},
             "run_in_background": {"type": "boolean"},
+            "team_name": {"type": "string", "description": "Team name to spawn as teammate"},
+            "name": {"type": "string", "description": "Teammate name (required with team_name)"},
         },
         "required": ["description", "prompt", "agent_type"],
     },
@@ -787,6 +1003,7 @@ SKILL_TOOL = {
     "input_schema": {"type": "object", "properties": {"skill": {"type": "string"}}, "required": ["skill"]},
 }
 
+# Task CRUD tools (from v6)
 TASK_CREATE_TOOL = {
     "name": "TaskCreate", "description": "Create a new task to track work.",
     "input_schema": {"type": "object", "properties": {
@@ -815,6 +1032,7 @@ TASK_LIST_TOOL = {
     "input_schema": {"type": "object", "properties": {}},
 }
 
+# Background task management tools
 TASK_OUTPUT_TOOL = {
     "name": "TaskOutput", "description": "Get output from a background task. block=true to wait for completion.",
     "input_schema": {"type": "object", "properties": {
@@ -829,10 +1047,26 @@ TASK_STOP_TOOL = {
     "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
 }
 
+# Teammate tools
+TEAM_CREATE_TOOL = {
+    "name": "TeamCreate", "description": "Create a team for persistent collaboration.",
+    "input_schema": {"type": "object", "properties": {"name": {"type": "string", "description": "Team name"}}, "required": ["name"]},
+}
+
+TEAM_DELETE_TOOL = {
+    "name": "TeamDelete", "description": "Shutdown and delete a team.",
+    "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+}
+
+# Teammate tools: base tools + task CRUD (no messaging in this foundation version)
+TEAMMATE_TOOLS = BASE_TOOLS + [TASK_CREATE_TOOL, TASK_GET_TOOL, TASK_UPDATE_TOOL, TASK_LIST_TOOL]
+
+# Lead agent tools: everything
 ALL_TOOLS = BASE_TOOLS + [
     SUBAGENT_TOOL, SKILL_TOOL,
     TASK_CREATE_TOOL, TASK_GET_TOOL, TASK_UPDATE_TOOL, TASK_LIST_TOOL,
     TASK_OUTPUT_TOOL, TASK_STOP_TOOL,
+    TEAM_CREATE_TOOL, TEAM_DELETE_TOOL,
 ]
 
 
@@ -842,6 +1076,12 @@ def get_tools_for_agent(agent_type: str) -> list:
     if allowed == "*":
         return BASE_TOOLS
     return [t for t in BASE_TOOLS if t["name"] in allowed]
+
+
+def _get_teammate_tools() -> list:
+    """Get tools for a persistent teammate (base + tasks).
+    In production, tools would be filtered per agent_type."""
+    return TEAMMATE_TOOLS
 
 
 # =============================================================================
@@ -914,9 +1154,13 @@ def run_skill(skill_name: str) -> str:
 
 
 def run_subagent(description: str, prompt: str, agent_type: str,
-                 background: bool = False) -> str:
+                 background: bool = False, team_name: str = None, name: str = None) -> str:
     if agent_type not in AGENT_TYPES:
         return f"Error: Unknown agent type '{agent_type}'"
+
+    # If team_name + name provided, spawn as persistent teammate
+    if team_name and name:
+        return TEAM_MGR.spawn_teammate(name, team_name, prompt)
 
     if background:
         task_id = BG.run_in_background(
@@ -971,8 +1215,6 @@ def run_task_get(task_id: str) -> str:
 
 
 def run_task_update(task_id: str, **kwargs) -> str:
-    # status="deleted" triggers file removal (production cli.js deletes the file entirely).
-    # The stored Task schema only has: pending, in_progress, completed.
     if kwargs.get("status") == "deleted":
         if TASK_MGR.delete(task_id):
             return f"Task {task_id} deleted"
@@ -1009,6 +1251,7 @@ def execute_tool(name: str, args: dict) -> str:
         return run_subagent(
             args["description"], args["prompt"], args["agent_type"],
             args.get("run_in_background", False),
+            args.get("team_name"), args.get("name"),
         )
     if name == "Skill":
         return run_skill(args["skill"])
@@ -1027,6 +1270,10 @@ def execute_tool(name: str, args: dict) -> str:
     if name == "TaskStop":
         result = BG.stop_task(args["task_id"])
         return json.dumps(result)
+    if name == "TeamCreate":
+        return TEAM_MGR.create_team(args["name"])
+    if name == "TeamDelete":
+        return TEAM_MGR.delete_team(args["name"])
     return f"Unknown tool: {name}"
 
 
@@ -1045,15 +1292,24 @@ def agent_loop(messages: list) -> list:
         # Drain background task notifications and inject before API call
         notifications = BG.drain_notifications()
         if notifications:
-            # Inject as attachment objects matching cli.js attachment pipeline
+            notif_text = "\n".join(
+                f"<task-notification>\n"
+                f"  <task-id>{n['task_id']}</task-id>\n"
+                f"  <task-type>{n.get('task_type', 'unknown')}</task-type>\n"
+                f"  <status>{n['status']}</status>\n"
+                f"  <summary>{n['summary']}</summary>\n"
+                f"  <output-file>{n.get('output_file', '')}</output-file>\n"
+                f"</task-notification>"
+                for n in notifications
+            )
             if messages and messages[-1].get("role") == "user":
                 content = messages[-1].get("content", "")
                 if isinstance(content, str):
-                    messages[-1]["content"] = [{"type": "text", "text": content}] + notifications
+                    messages[-1]["content"] = content + "\n\n" + notif_text
                 elif isinstance(content, list):
-                    content.extend(notifications)
+                    content.append({"type": "text", "text": notif_text})
             else:
-                messages.append({"role": "user", "content": notifications})
+                messages.append({"role": "user", "content": notif_text})
 
         response = client.messages.create(model=MODEL, system=SYSTEM, messages=messages, tools=ALL_TOOLS, max_tokens=8000)
 
@@ -1072,11 +1328,15 @@ def agent_loop(messages: list) -> list:
         for tc in tool_calls:
             if tc.name == "Task":
                 bg = tc.input.get("run_in_background", False)
-                print(f"\n> Task{'(bg)' if bg else ''}: {tc.input.get('description', 'subtask')}")
+                tm = tc.input.get("team_name")
+                label = f"Task(teammate:{tc.input.get('name', '?')})" if tm else f"Task{'(bg)' if bg else ''}"
+                print(f"\n> {label}: {tc.input.get('description', 'subtask')}")
             elif tc.name == "Skill":
                 print(f"\n> Loading skill: {tc.input.get('skill', '?')}")
             elif tc.name in ("TaskOutput", "TaskStop"):
                 print(f"\n> {tc.name}: {tc.input.get('task_id', '')}")
+            elif tc.name in ("TeamCreate", "TeamDelete"):
+                print(f"\n> {tc.name}: {tc.input.get('name', '')}")
             elif tc.name.startswith("Task"):
                 print(f"\n> {tc.name}: {tc.input.get('subject', tc.input.get('taskId', ''))}")
             else:
@@ -1088,7 +1348,7 @@ def agent_loop(messages: list) -> list:
 
             if tc.name == "Skill":
                 print(f"  Skill loaded ({len(output)} chars)")
-            elif tc.name != "Task" or tc.input.get("run_in_background"):
+            elif tc.name != "Task" or tc.input.get("run_in_background") or tc.input.get("team_name"):
                 preview = output[:200] + "..." if len(output) > 200 else output
                 print(f"  {preview}")
 
@@ -1103,9 +1363,9 @@ def agent_loop(messages: list) -> list:
 # =============================================================================
 
 def main():
-    print(f"Mini Claude Code v7 (with Background Tasks) - {WORKDIR}")
+    print(f"Mini Claude Code v8a (Team Foundation) - {WORKDIR}")
     print(f"Skills: {', '.join(SKILLS.list_skills()) or 'none'}")
-    print("Commands: /compact, /tasks, exit")
+    print("Commands: /compact, /tasks, /team, exit")
     print()
 
     history = []
@@ -1130,6 +1390,11 @@ def main():
 
         if user_input.strip() == "/tasks":
             print(run_task_list())
+            print()
+            continue
+
+        if user_input.strip() == "/team":
+            print(TEAM_MGR.get_team_status())
             print()
             continue
 

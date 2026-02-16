@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        session: [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9]
+        session: [v0, v1, v2, v3, v4, v5, v6, v7, v8a, v8b, v8c, v9]
     steps:
       - uses: actions/checkout@v6
 

@@ -87,6 +87,7 @@ Rules:
 
 # =============================================================================
 # Tool Definitions - 4 tools cover 90% of coding tasks
+# Production name mapping: bash->Bash, read_file->Read, write_file->Write, edit_file->Edit
 # =============================================================================
 
 TOOLS = [
@@ -198,7 +199,7 @@ def run_bash(command: str) -> str:
     Execute shell command with safety checks.
 
     Security: Blocks obviously dangerous commands.
-    Timeout: 60 seconds to prevent hanging.
+    Timeout: 120 seconds (production default, max 600s).
     Output: Truncated to 50KB to prevent context overflow.
     """
     # Basic safety - block dangerous patterns
@@ -213,13 +214,13 @@ def run_bash(command: str) -> str:
             cwd=WORKDIR,
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=120
         )
         output = (result.stdout + result.stderr).strip()
         return output[:50000] if output else "(no output)"
 
     except subprocess.TimeoutExpired:
-        return "Error: Command timed out (60s)"
+        return "Error: Command timed out (120s)"
     except Exception as e:
         return f"Error: {e}"
 

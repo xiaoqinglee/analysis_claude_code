@@ -73,11 +73,17 @@ Start Here
 [v7: Background Agent] -----> "Don't wait, keep working"
     |                          +BackgroundManager, ~1142 lines
     v
-[v8: Team Agent] -----------> "Teammates that communicate"
-    |                          +TeammateManager, ~1553 lines
+[v8a: Team Foundation] --> "Creating and managing teammates"
+    |                       +TeammateManager, ~1395 lines
+    v
+[v8b: Messaging] --------> "Teammates that communicate"
+    |                       +SendMessage/Inbox, ~1557 lines
+    v
+[v8c: Coordination] -----> "Shared tasks and shutdown protocol"
+    |                       +SharedBoard/Protocol, ~1612 lines
     v
 [v9: Autonomous Agent] -----> "A self-organizing team"
-                               +Idle cycle, ~1657 lines
+                               +Idle cycle, ~1683 lines
 ```
 
 **Recommended approach:**
@@ -89,14 +95,14 @@ Start Here
 6. Study v5 for context management and compression
 7. Explore v6 for persistent task tracking
 8. Understand v7 for parallel background execution
-9. Study v8 for team lifecycle and messaging
-      a. Start with TeammateManager (creation, deletion, config)
-      b. Understand the message protocol (5 types, JSONL inbox)
-      c. Study the teammate loop (simplified: work -> check inbox -> exit)
-      d. Trace a full lifecycle: TeamCreate -> spawn -> message -> TeamDelete
+9. Study v8a/v8b/v8c for team lifecycle and messaging
+      a. v8a - TeammateManager (creation, deletion, config, tool scoping)
+      b. v8b - Message protocol (5 types, JSONL inbox, inbox routing)
+      c. v8c - Shared task board, shutdown protocol, plan approval
+      d. Trace a full lifecycle across v8a -> v8b -> v8c
 10. Master v9 for autonomous multi-agent collaboration
 
-**Note:** v7 to v8 is the largest version jump (+411 lines, 36% increase). v8 introduces team lifecycle, message protocol, and inbox architecture all at once. The sub-step approach above (9a-9d) is strongly recommended.
+**Note:** v8 is split into three progressive sub-versions (v8a -> v8b -> v8c), each adding one concept. This makes the jump from v7 more gradual.
 
 ## Learning Progression
 
@@ -105,9 +111,9 @@ v0(196) -> v1(417) -> v2(531) -> v3(623) -> v4(783)
    |          |          |          |          |
  Bash      4 Tools    Planning   Subagent   Skills
 
--> v5(896) -> v6(1075) -> v7(1142) -> v8(1553) -> v9(1657)
-     |           |            |           |           |
- Compress     Tasks      Background    Teams     Autonomous
+-> v5(896) -> v6(1075) -> v7(1142) -> v8a(1395) -> v8b(1557) -> v8c(1612) -> v9(1683)
+     |           |            |            |            |            |            |
+ Compress     Tasks      Background   Foundation   Messaging   Coordination  Autonomous
 ```
 
 ## Quick Start
@@ -133,7 +139,9 @@ python v4_skills_agent.py       # + Skills
 python v5_compression_agent.py  # + Context compression
 python v6_tasks_agent.py        # + Task system
 python v7_background_agent.py   # + Background tasks
-python v8_team_agent.py         # + Team messaging
+python v8a_team_foundation.py  # + Team foundation
+python v8b_messaging.py        # + Team messaging
+python v8c_coordination.py     # + Team coordination
 python v9_autonomous_agent.py  # + Autonomous teams
 ```
 
@@ -147,7 +155,7 @@ python tests/run_all.py
 python tests/test_unit.py
 
 # Run tests for a specific version
-python -m pytest tests/test_v8.py -v
+python -m pytest tests/test_v8a.py tests/test_v8b.py tests/test_v8c.py -v
 ```
 
 ## The Core Pattern
@@ -177,8 +185,10 @@ That's it. The model calls tools until done. Everything else is refinement.
 | [v5](./v5_compression_agent.py) | ~896 | +ContextManager | 3-layer compression | Forgetting enables infinite work |
 | [v6](./v6_tasks_agent.py) | ~1075 | +TaskCreate/Get/Update/List | Persistent tasks | Sticky notes to kanban |
 | [v7](./v7_background_agent.py) | ~1142 | +TaskOutput/TaskStop | Background execution | Serial to parallel |
-| [v8](./v8_team_agent.py) | ~1553 | +TeamCreate/SendMessage/TeamDelete | Team messaging | Command to collaboration |
-| [v9](./v9_autonomous_agent.py) | ~1657 | +Idle cycle/auto-claim | Autonomous teams | Collaboration to self-organization |
+| [v8a](./v8a_team_foundation.py) | ~1395 | +TeamCreate/TeamDelete | Team foundation | Building the team structure |
+| [v8b](./v8b_messaging.py) | ~1557 | +SendMessage/Inbox | Team messaging | Communication channels |
+| [v8c](./v8c_coordination.py) | ~1612 | +SharedBoard/Protocol | Team coordination | Command to collaboration |
+| [v9](./v9_autonomous_agent.py) | ~1683 | +Idle cycle/auto-claim | Autonomous teams | Collaboration to self-organization |
 
 ## Sub-Mechanism Guide
 
@@ -201,11 +211,12 @@ Each version introduces one core class, but the real learning is in the sub-mech
 | **Background execution** | v7 | `BackgroundManager.run_in_background()` | Thread-based, immediate task_id return |
 | **ID prefix convention** | v7 | `_PREFIXES` | `b`=bash, `a`=agent (v8 adds `t`=teammate) |
 | **Notification bus** | v7 | `drain_notifications()` | Queue drained before each API call |
-| **Notification injection** | v7 | `<task-notification>` XML | Injected into last user message |
-| **Teammate lifecycle** | v8 | `_teammate_loop()` | Work -> check inbox -> exit pattern |
-| **File-based inbox** | v8 | `send_message()/check_inbox()` | JSONL format, per-teammate files |
-| **Message protocol** | v8 | `MESSAGE_TYPES` | 5 types: message, broadcast, shutdown_req/resp, plan_approval |
-| **Tool scoping** | v8 | `TEAMMATE_TOOLS` | Teammates get 9 tools (no TeamCreate/Delete/Task/Skill) |
+| **Notification injection** | v7 | attachment-based notification | Injected into last user message |
+| **Teammate lifecycle** | v8a | `_teammate_loop()` | Work -> check inbox -> exit pattern |
+| **Tool scoping** | v8a | `TEAMMATE_TOOLS` | Teammates get 9 tools (no TeamCreate/Delete/Task/Skill) |
+| **File-based inbox** | v8b | `send_message()/check_inbox()` | JSONL format, per-teammate files |
+| **Message protocol** | v8b | `MESSAGE_TYPES` | 5 types: message, broadcast, shutdown_req/resp, plan_approval |
+| **Shutdown protocol** | v8c | `SharedBoard/Protocol` | Graceful shutdown and plan approval |
 | **Idle cycle** | v9 | `_teammate_loop()` | active -> idle -> poll inbox -> wake -> active |
 | **Task claiming** | v9 | `_teammate_loop()` | Idle teammates auto-claim unclaimed tasks |
 | **Identity preservation** | v9 | `auto_compact` + identity | Teammate name/role re-injected after compression |
@@ -223,8 +234,10 @@ learn-claude-code/
 |-- v5_compression_agent.py   # ~896 lines: + ContextManager, 3-layer compression
 |-- v6_tasks_agent.py         # ~1075 lines: + TaskManager, CRUD with dependencies
 |-- v7_background_agent.py    # ~1142 lines: + BackgroundManager, parallel execution
-|-- v8_team_agent.py          # ~1553 lines: + TeammateManager, team messaging
-|-- v9_autonomous_agent.py    # ~1657 lines: + Idle cycle, auto-claim, identity preservation
+|-- v8a_team_foundation.py  # ~1395 lines: + TeammateManager, team lifecycle
+|-- v8b_messaging.py        # ~1557 lines: + SendMessage, inbox, message protocol
+|-- v8c_coordination.py     # ~1612 lines: + Shared task board, shutdown protocol
+|-- v9_autonomous_agent.py    # ~1683 lines: + Idle cycle, auto-claim, identity preservation
 |-- skills/                   # Example skills (pdf, code-review, mcp-builder, agent-builder)
 |-- docs/                     # Technical documentation (EN + ZH + JA)
 |-- articles/                 # Blog-style articles (ZH)

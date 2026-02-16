@@ -160,12 +160,12 @@ def chat(prompt, history=None):
                         shell=True,
                         capture_output=True,
                         text=True,
-                        timeout=300,
+                        timeout=120,  # matches production default (max 600s)
                         cwd=os.getcwd()
                     )
                     output = out.stdout + out.stderr
                 except subprocess.TimeoutExpired:
-                    output = "(timeout after 300s)"
+                    output = "(timeout after 120s)"
 
                 print(output or "(empty)")
                 results.append({

@@ -35,11 +35,14 @@ Main Thread                              Background Threads
     v                                         |   queue.put(notif)
 +---+----------------------+                  |
 | Inject into messages:    | <----------------+
-| <task-notification>      |
-|   <task-id>a3f7c2</>     |
-|   <status>completed</>   |
-|   <summary>Found 3...</> |
-| </task-notification>     |
+| attachment format:       |
+| {"type": "attachment",   |
+|  "attachment": {         |
+|    "type":"task_status", |
+|    "task_id":"a3f7c2",   |
+|    "status":"completed", |
+|    "summary":"Found 3.." |
+|  }}                      |
 +--------------------------+
 ```
 
@@ -104,12 +107,17 @@ def wrapper():
     finally:
         output_path = self._write_output(task_id, bg_task.output)
         bg_task.event.set()           # Always signal completion
-        self._notifications.put({     # Always push notification
-            "task_id": task_id,
-            "task_type": bg_task.task_type,
-            "status": bg_task.status,
-            "summary": bg_task.output[:500],
-            "output_file": str(output_path),
+        # Matches cli.js attachment pipeline for task notifications
+        self._notifications.put({
+            "type": "attachment",
+            "attachment": {
+                "type": "task_status",
+                "task_id": task_id,
+                "task_type": bg_task.task_type,
+                "status": bg_task.status,
+                "summary": bg_task.output[:500],
+                "output_file": str(output_path),
+            },
         })
 ```
 
@@ -158,55 +166,40 @@ TaskStop(task_id="a3f7c2")
 
 ## Notification Drain/Inject Cycle
 
-The notification bus is implemented as a `queue.Queue`. The main agent loop performs a **drain-and-inject** cycle before every API call:
+The notification bus is implemented as a `queue.Queue`. The main agent loop performs a **drain-and-inject** cycle before every API call. Notifications use the attachment format matching cli.js:
 
 ```python
 # 1. Drain: pull all pending notifications from the queue
 notifications = BG.drain_notifications()
 
-# 2. Format: convert to XML blocks
-notif_text = "\n".join(
-    f"<task-notification>\n"
-    f"  <task-id>{n['task_id']}</task-id>\n"
-    f"  <task-type>{n.get('task_type', 'unknown')}</task-type>\n"
-    f"  <status>{n['status']}</status>\n"
-    f"  <summary>{n['summary']}</summary>\n"
-    f"  <output-file>{n.get('output_file', '')}</output-file>\n"
-    f"</task-notification>"
-    for n in notifications
-)
-
-# 3. Inject: append to the last user message (or create a new one)
-if messages[-1]["role"] == "user":
-    messages[-1]["content"] += "\n\n" + notif_text
-else:
-    messages.append({"role": "user", "content": notif_text})
+# 2. Inject: append as attachment objects to the last user message
+# Each notification is already in attachment format:
+# {"type": "attachment", "attachment": {"type": "task_status", ...}}
+if notifications:
+    if messages[-1]["role"] == "user":
+        content = messages[-1]["content"]
+        if isinstance(content, list):
+            content.extend(notifications)
+        else:
+            messages[-1]["content"] = [{"type": "text", "text": content}] + notifications
+    else:
+        messages.append({"role": "user", "content": notifications})
 ```
-
-## Non-Editable Queue Mode
-
-Notification XML blocks are marked as non-editable:
-
-```python
-NON_EDITABLE_MODES = {"task-notification"}
-
-def is_editable(mode: str) -> bool:
-    return mode not in NON_EDITABLE_MODES
-```
-
-This prevents the model from attempting to modify injected notification text.
 
 ## Output File System
 
-Background task outputs are saved to disk at `.task_outputs/{task_id}.txt`:
+Background task outputs are saved to disk at `.task_outputs/{task_id}.output`:
 
 ```python
 OUTPUT_DIR = WORKDIR / ".task_outputs"
 
-def _write_output(self, task_id, output):
-    path = OUTPUT_DIR / f"{task_id}.txt"
+def _write_output(self, task_id, content):
+    # cli.js jSA=32000 default, configurable up to 160000 via TASK_MAX_OUTPUT_LENGTH env var
+    max_output_chars = int(os.getenv("TASK_MAX_OUTPUT_LENGTH", "32000"))
+    path = OUTPUT_DIR / f"{task_id}.output"
+    truncated = content[:max_output_chars]
     with open(path, "a") as f:
-        f.write(output)
+        f.write(truncated)
     return path
 ```
 
@@ -225,7 +218,7 @@ Main Agent:
   (three tasks running in parallel)
 
   4. TaskOutput("a1c4e9", block=True)  -> wait and get result
-  5. <task-notification> b5e8f1 completed  (ESLint finished while waiting)
+  5. attachment notification: b5e8f1 completed  (ESLint finished while waiting)
   6. TaskOutput("a7b2d3", block=True)  -> get second result
   7. Synthesize all three results into a report
 ```

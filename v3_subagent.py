@@ -44,11 +44,11 @@ By spawning subtasks, we get:
 
 Agent Type Registry:
 -------------------
-    | Type    | Tools               | Purpose                     |
-    |---------|---------------------|---------------------------- |
-    | explore | bash, read_file     | Read-only exploration       |
-    | code    | all tools           | Full implementation access  |
-    | plan    | bash, read_file     | Design without modifying    |
+    | Type            | Tools               | Purpose                     |
+    |-----------------|---------------------|---------------------------- |
+    | Explore         | bash, read_file     | Read-only exploration       |
+    | general-purpose | all tools           | Full implementation access  |
+    | Plan            | bash, read_file     | Design without modifying    |
 
 Typical Flow:
 -------------
@@ -106,26 +106,26 @@ MODEL = os.getenv("MODEL_ID", "claude-sonnet-4-5-20250929")
 
 AGENT_TYPES = {
     # Explore: Read-only agent for searching and analyzing
-    # Cannot modify files - safe for broad exploration
-    "explore": {
+    # Production gives Explore all tools except Task/Edit/Write/NotebookEdit
+    "Explore": {
         "description": "Read-only agent for exploring code, finding files, searching",
-        "tools": ["bash", "read_file"],  # No write access
+        "tools": ["bash", "read_file"],
         "prompt": "You are an exploration agent. Search and analyze, but never modify files. Return a concise summary.",
     },
 
-    # Code: Full-powered agent for implementation
+    # general-purpose: Full-powered agent for implementation
     # Has all tools - use for actual coding work
-    "code": {
+    "general-purpose": {
         "description": "Full agent for implementing features and fixing bugs",
         "tools": "*",  # All tools
         "prompt": "You are a coding agent. Implement the requested changes efficiently.",
     },
 
     # Plan: Analysis agent for design work
-    # Read-only, focused on producing plans and strategies
-    "plan": {
+    # Production gives Plan all tools except Task/Edit/Write/NotebookEdit
+    "Plan": {
         "description": "Planning agent for designing implementation strategies",
-        "tools": ["bash", "read_file"],  # Read-only
+        "tools": ["bash", "read_file"],
         "prompt": "You are a planning agent. Analyze the codebase and output a numbered implementation plan. Do NOT make changes.",
     },
 }
@@ -319,13 +319,13 @@ Example uses:
                 "type": "string",
                 "description": "Detailed instructions for the subagent"
             },
-            "agent_type": {
+            "subagent_type": {
                 "type": "string",
                 "enum": list(AGENT_TYPES.keys()),
                 "description": "Type of agent to spawn"
             },
         },
-        "required": ["description", "prompt", "agent_type"],
+        "required": ["description", "prompt", "subagent_type"],
     },
 }
 
@@ -367,7 +367,7 @@ def run_bash(cmd: str) -> str:
     try:
         r = subprocess.run(
             cmd, shell=True, cwd=WORKDIR,
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=120
         )
         return ((r.stdout + r.stderr).strip() or "(no output)")[:50000]
     except Exception as e:
@@ -421,7 +421,7 @@ def run_todo(items: list) -> str:
 # Subagent Execution - The heart of v3
 # =============================================================================
 
-def run_task(description: str, prompt: str, agent_type: str) -> str:
+def run_task(description: str, prompt: str, subagent_type: str) -> str:
     """
     Execute a subagent task with isolated context.
 
@@ -442,27 +442,27 @@ def run_task(description: str, prompt: str, agent_type: str) -> str:
 
     This gives visibility without polluting the main conversation.
     """
-    if agent_type not in AGENT_TYPES:
-        return f"Error: Unknown agent type '{agent_type}'"
+    if subagent_type not in AGENT_TYPES:
+        return f"Error: Unknown agent type '{subagent_type}'"
 
-    config = AGENT_TYPES[agent_type]
+    config = AGENT_TYPES[subagent_type]
 
     # Agent-specific system prompt
-    sub_system = f"""You are a {agent_type} subagent at {WORKDIR}.
+    sub_system = f"""You are a {subagent_type} subagent at {WORKDIR}.
 
 {config["prompt"]}
 
 Complete the task and return a clear, concise summary."""
 
     # Filtered tools for this agent type
-    sub_tools = get_tools_for_agent(agent_type)
+    sub_tools = get_tools_for_agent(subagent_type)
 
     # ISOLATED message history - this is the key!
     # The subagent starts fresh, doesn't see parent's conversation
     sub_messages = [{"role": "user", "content": prompt}]
 
     # Progress tracking
-    print(f"  [{agent_type}] {description}")
+    print(f"  [{subagent_type}] {description}")
     start = time.time()
     tool_count = 0
 
@@ -494,7 +494,7 @@ Complete the task and return a clear, concise summary."""
             # Update progress line (in-place)
             elapsed = time.time() - start
             sys.stdout.write(
-                f"\r  [{agent_type}] {description} ... {tool_count} tools, {elapsed:.1f}s"
+                f"\r  [{subagent_type}] {description} ... {tool_count} tools, {elapsed:.1f}s"
             )
             sys.stdout.flush()
 
@@ -504,7 +504,7 @@ Complete the task and return a clear, concise summary."""
     # Final progress update
     elapsed = time.time() - start
     sys.stdout.write(
-        f"\r  [{agent_type}] {description} - done ({tool_count} tools, {elapsed:.1f}s)\n"
+        f"\r  [{subagent_type}] {description} - done ({tool_count} tools, {elapsed:.1f}s)\n"
     )
 
     # Extract and return only the final text
@@ -529,7 +529,7 @@ def execute_tool(name: str, args: dict) -> str:
     if name == "TodoWrite":
         return run_todo(args["items"])
     if name == "Task":
-        return run_task(args["description"], args["prompt"], args["agent_type"])
+        return run_task(args["description"], args["prompt"], args["subagent_type"])
     return f"Unknown tool: {name}"
 
 

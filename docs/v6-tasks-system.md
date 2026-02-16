@@ -23,7 +23,7 @@ v5 compression clears in-memory todos. Subagents can't share tasks. The Tasks sy
 |---------|---------------|------------|
 | Operations | Overwrite | CRUD (create/read/update/delete) |
 | Persistence | Memory only (lost on compact) | Disk files (survives compact) |
-| Concurrency | Unsafe | Thread-level locking |
+| Concurrency | Unsafe | Thread-level locking (in-process threading.Lock; production uses file-based locks via proper-lockfile) |
 | Dependencies | None | blocks / blockedBy |
 | Ownership | None | Agent name |
 | Multi-agent | Not supported | Native support |
@@ -39,7 +39,7 @@ v5 compression clears in-memory todos. Subagents can't share tasks. The Tasks sy
     +------------------------------------+                                     |
                 (re-open)                                                      |
                                                                                |
-  Any state ---> deleted (permanent removal)                                   |
+  Any state ---> deleted (file is physically deleted from disk)                                   |
                                                                                |
   On completion, auto-clear dependency:                                        |
   +---------------------------------------------------------------------------+
@@ -70,14 +70,27 @@ class Task:
 
 ## Highwatermark ID Allocation
 
-Task IDs use a counter that only goes up, loaded from scanning existing task files on startup:
+Task IDs use a counter that only goes up. The counter is persisted to a `.highwatermark` file and falls back to scanning existing task files on startup:
 
 ```python
+HIGHWATERMARK_FILE = ".highwatermark"
+
 def _load_counter(self):
-    existing = list(self.tasks_dir.glob("task_*.json"))
+    hwm_path = self.tasks_dir / HIGHWATERMARK_FILE
+    if hwm_path.exists():
+        try:
+            return int(hwm_path.read_text().strip()) + 1
+        except ValueError:
+            pass
+    existing = list(self.tasks_dir.glob("*.json"))
     if not existing:
         return 1
-    ids = [int(f.stem.split("_")[1]) for f in existing]
+    ids = []
+    for f in existing:
+        try:
+            ids.append(int(f.stem))
+        except ValueError:
+            pass
     return max(ids) + 1 if ids else 1
 ```
 
@@ -128,15 +141,21 @@ When #1 completes -> _clear_dependency("1"):
 ## File-Based Persistence
 
 ```python
+def _task_path(self, task_id):
+    return self.tasks_dir / f"{self._sanitize_id(task_id)}.json"
+
 def _save_task(self, task):
-    path = self.tasks_dir / f"task_{task.id}.json"
+    path = self._task_path(task.id)
     path.write_text(json.dumps(asdict(task), indent=2))
 ```
+
+Task IDs are sanitized for filenames: non-alphanumeric characters (except `_` and `-`) are replaced with `-`. For example, task ID `"1"` becomes `1.json`.
 
 Why files instead of a database:
 - One file per task = fine-grained locking
 - Subagents may run in separate processes
 - JSON files are human-readable, easy to debug
+- Task list ID resolved from `CLAUDE_CODE_TASK_LIST_ID` env > `CLAUDE_TEAM_NAME` env > `"default"` fallback
 
 ## Working with Compression (v5)
 

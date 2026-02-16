@@ -42,9 +42,11 @@ def execute_tool(name, args):
 
 ## The Four Tools
 
+Production name mapping: bash->Bash, read_file->Read, write_file->Write, edit_file->Edit.
+
 | Tool | Purpose | Key feature |
 |------|---------|-------------|
-| bash | Run any command | timeout=60s, dangerous command blocking |
+| bash | Run any command | timeout=120s, dangerous command blocking |
 | read_file | Read file contents | Optional line limit, output truncation |
 | write_file | Create/overwrite files | Auto-creates parent directories |
 | edit_file | Surgical text replacement | Exact string match, first occurrence only |
@@ -106,7 +108,7 @@ The system prompt teaches the agent its behavior pattern. The working directory 
 | File writing | echo, cat << EOF | write_file with auto-mkdir |
 | File editing | sed -i | edit_file with exact match |
 | Security | None | safe_path + dangerous command blocking |
-| Timeout | 300s | 60s |
+| Timeout | 120s | 120s |
 
 ## The Deeper Insight
 

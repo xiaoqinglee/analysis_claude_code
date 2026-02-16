@@ -54,7 +54,7 @@ def chat(prompt, history=[]):
         results = []
         for b in r.content:
             if b.type == "tool_use":
-                out = subprocess.run(b.input["command"], shell=True, capture_output=True, text=True, timeout=300)
+                out = subprocess.run(b.input["command"], shell=True, capture_output=True, text=True, timeout=120)
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": out.stdout + out.stderr})
         history.append({"role": "user", "content": results})
 
@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
 | 機能 | v0 | v3 |
 |------|----|-----|
-| エージェントタイプ | なし | explore/code/plan |
+| エージェントタイプ | なし | Explore/general-purpose/Plan |
 | ツールフィルタリング | なし | ホワイトリスト |
 | 進捗表示 | 通常のstdout | インライン更新 |
 | コードの複雑さ | 約50行 | 約450行 |

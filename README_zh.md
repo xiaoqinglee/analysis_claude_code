@@ -73,11 +73,17 @@
 [v7: Background] -----> "不等结果，继续干活"
     |                    +BackgroundManager，~1142 行
     v
-[v8: Team Agent] -----> "团队通信"
-    |                    +TeammateManager，~1553 行
+[v8a: Team Foundation] --> "创建和管理队友"
+    |                      +TeammateManager，~1395 行
+    v
+[v8b: Messaging] --------> "队友间通信"
+    |                       +SendMessage/Inbox，~1557 行
+    v
+[v8c: Coordination] -----> "共享任务板和关闭协议"
+    |                       +SharedBoard/Protocol，~1612 行
     v
 [v9: Autonomous] -----> "自治团队"
-                         +空闲循环，~1657 行
+                         +空闲循环，~1683 行
 ```
 
 **推荐学习方式：**
@@ -89,14 +95,14 @@
 6. 学习 v5 的上下文管理与压缩
 7. 探索 v6 的持久化任务追踪
 8. 理解 v7 的并行后台执行
-9. 学习 v8 的团队生命周期与消息通信
-      a. 从 TeammateManager 开始（创建、删除、配置）
-      b. 理解消息协议（5 种类型、JSONL 邮箱）
-      c. 学习 Teammate 循环（简化版：工作 -> 检查邮箱 -> 退出）
-      d. 追踪完整的生命周期：TeamCreate -> spawn -> message -> TeamDelete
+9. 学习 v8a/v8b/v8c 的团队生命周期与消息通信
+      a. v8a - TeammateManager（创建、删除、配置、工具权限）
+      b. v8b - 消息协议（5 种类型、JSONL 邮箱、邮箱路由）
+      c. v8c - 共享任务板、关闭协议、计划审批
+      d. 追踪完整的生命周期：v8a -> v8b -> v8c
 10. 掌握 v9 的自治多 Agent 协作
 
-**注意：** v7 到 v8 是最大的版本跳跃（+411 行，增幅 36%）。v8 一次性引入了团队生命周期、消息协议和邮箱架构。强烈建议使用上述子步骤方式（9a-9d）学习。
+**注意：** v8 被拆分为三个渐进子版本（v8a -> v8b -> v8c），每个只新增一个概念。这使得从 v7 的跳跃更加平缓。
 
 ## 学习进度
 
@@ -105,9 +111,9 @@ v0(196) -> v1(417) -> v2(531) -> v3(623) -> v4(783)
    |          |          |          |          |
  Bash      4 Tools    Planning   Subagent   Skills
 
--> v5(896) -> v6(1075) -> v7(1142) -> v8(1553) -> v9(1657)
-     |           |            |           |           |
- Compress     Tasks      Background    Teams     Autonomous
+-> v5(896) -> v6(1075) -> v7(1142) -> v8a(1395) -> v8b(1557) -> v8c(1612) -> v9(1683)
+     |           |            |            |            |            |            |
+ Compress     Tasks      Background   Foundation   Messaging   Coordination  Autonomous
 ```
 
 ## 快速开始
@@ -133,7 +139,9 @@ python v4_skills_agent.py       # + Skills
 python v5_compression_agent.py  # + 上下文压缩
 python v6_tasks_agent.py        # + 任务系统
 python v7_background_agent.py   # + 后台任务
-python v8_team_agent.py         # + 团队通信
+python v8a_team_foundation.py  # + 团队基础
+python v8b_messaging.py        # + 团队通信
+python v8c_coordination.py     # + 团队协调
 python v9_autonomous_agent.py  # + 自治团队
 ```
 
@@ -147,7 +155,7 @@ python tests/run_all.py
 python tests/test_unit.py
 
 # 运行特定版本的测试
-python -m pytest tests/test_v8.py -v
+python -m pytest tests/test_v8a.py tests/test_v8b.py tests/test_v8c.py -v
 ```
 
 ## 核心模式
@@ -177,8 +185,10 @@ while True:
 | [v5](./v5_compression_agent.py) | ~896 | +ContextManager | 三层压缩 | 遗忘成就无限工作 |
 | [v6](./v6_tasks_agent.py) | ~1075 | +TaskCreate/Get/Update/List | 持久化任务 | 便利贴到看板 |
 | [v7](./v7_background_agent.py) | ~1142 | +TaskOutput/TaskStop | 后台执行 | 串行到并行 |
-| [v8](./v8_team_agent.py) | ~1553 | +TeamCreate/SendMessage/TeamDelete | 团队通信 | 命令到协作 |
-| [v9](./v9_autonomous_agent.py) | ~1657 | +空闲循环/自动认领 | 自治团队 | 协作到自组织 |
+| [v8a](./v8a_team_foundation.py) | ~1395 | +TeamCreate/TeamDelete | 团队基础 | 构建团队结构 |
+| [v8b](./v8b_messaging.py) | ~1557 | +SendMessage/Inbox | 团队通信 | 通信通道 |
+| [v8c](./v8c_coordination.py) | ~1612 | +SharedBoard/Protocol | 团队协调 | 命令到协作 |
+| [v9](./v9_autonomous_agent.py) | ~1683 | +空闲循环/自动认领 | 自治团队 | 协作到自组织 |
 
 ## 子机制导航
 
@@ -201,11 +211,12 @@ while True:
 | **后台执行** | v7 | `BackgroundManager.run_in_background()` | 线程执行，立即返回 task_id |
 | **ID 前缀约定** | v7 | `_PREFIXES` | `b`=bash, `a`=agent（v8 增加 `t`=teammate） |
 | **通知总线** | v7 | `drain_notifications()` | 每次 API 调用前清空队列 |
-| **通知注入** | v7 | `<task-notification>` XML | 注入到最后一条用户消息 |
-| **Teammate 生命周期** | v8 | `_teammate_loop()` | active -> 工作 -> 检查邮箱 -> 退出 |
-| **文件邮箱** | v8 | `send_message()/check_inbox()` | JSONL 格式，每个 Teammate 独立文件 |
-| **消息协议** | v8 | `MESSAGE_TYPES` | 5 种：message, broadcast, shutdown_req/resp, plan_approval |
-| **工具权限** | v8 | `TEAMMATE_TOOLS` | Teammate 获得 9 个工具（无 TeamCreate/Delete） |
+| **通知注入** | v7 | attachment-based notification | 注入到最后一条用户消息 |
+| **Teammate 生命周期** | v8a | `_teammate_loop()` | active -> 工作 -> 检查邮箱 -> 退出 |
+| **工具权限** | v8a | `TEAMMATE_TOOLS` | Teammate 获得 9 个工具（无 TeamCreate/Delete） |
+| **文件邮箱** | v8b | `send_message()/check_inbox()` | JSONL 格式，每个 Teammate 独立文件 |
+| **消息协议** | v8b | `MESSAGE_TYPES` | 5 种：message, broadcast, shutdown_req/resp, plan_approval |
+| **关闭协议** | v8c | `SharedBoard/Protocol` | 优雅关闭和计划审批 |
 | **空闲循环** | v9 | `_teammate_loop()` | active -> idle -> 轮询邮箱 -> 唤醒 -> active |
 | **任务认领** | v9 | `_teammate_loop()` | 空闲 Teammate 自动认领未分配任务 |
 | **身份保持** | v9 | `auto_compact` + identity | 压缩后重新注入 Teammate 名称/角色 |
@@ -223,8 +234,10 @@ learn-claude-code/
 |-- v5_compression_agent.py # ~896 行: + ContextManager，三层压缩
 |-- v6_tasks_agent.py      # ~1075 行: + TaskManager，依赖图 CRUD
 |-- v7_background_agent.py # ~1142 行: + BackgroundManager，并行执行
-|-- v8_team_agent.py       # ~1553 行: + TeammateManager，团队通信
-|-- v9_autonomous_agent.py # ~1657 行: + 空闲循环，自动认领，身份保持
+|-- v8a_team_foundation.py  # ~1395 行: + TeammateManager，团队生命周期
+|-- v8b_messaging.py        # ~1557 行: + SendMessage，邮箱，消息协议
+|-- v8c_coordination.py     # ~1612 行: + 共享任务板，关闭协议
+|-- v9_autonomous_agent.py  # ~1683 行: + 空闲循环，自动认领，身份保持
 |-- skills/                # 示例 Skills（pdf, code-review, mcp-builder, agent-builder）
 |-- docs/                  # 技术文档（中英日三语）
 |-- articles/              # 公众号风格文章

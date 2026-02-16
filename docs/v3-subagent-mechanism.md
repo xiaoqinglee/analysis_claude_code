@@ -9,7 +9,7 @@ v2 adds planning. But for large tasks like "explore the codebase then refactor a
 ```sh
 Main Agent (history=[..., 50 turns])
     |
-    | Task(agent_type="explore", prompt="Find auth files")
+    | Task(subagent_type="Explore", prompt="Find auth files")
     v
 +---------------------------------------------+
 | Subagent                                    |
@@ -37,15 +37,15 @@ The parent agent sees only the final summary. All intermediate tool calls, file 
 
 ```python
 AGENT_TYPES = {
-    "explore": {
+    "Explore": {
         "tools": ["bash", "read_file"],          # Read-only
         "prompt": "Search and analyze, but never modify files.",
     },
-    "code": {
+    "general-purpose": {
         "tools": "*",                             # All base tools
         "prompt": "Implement the requested changes efficiently.",
     },
-    "plan": {
+    "Plan": {
         "tools": ["bash", "read_file"],          # Read-only
         "prompt": "Analyze and output a numbered plan. Do NOT make changes.",
     },
@@ -54,9 +54,9 @@ AGENT_TYPES = {
 
 | Type | Tools | Purpose |
 |------|-------|---------|
-| explore | bash, read_file | Read-only exploration |
-| code | all base tools | Full implementation access |
-| plan | bash, read_file | Design without modifying |
+| Explore | bash, read_file | Read-only exploration |
+| general-purpose | all base tools | Full implementation access |
+| Plan | bash, read_file | Design without modifying |
 
 ## Tool Filtering
 
@@ -81,9 +81,9 @@ TASK_TOOL = {
         "properties": {
             "description": {"type": "string"},    # Short name for display
             "prompt": {"type": "string"},          # Detailed instructions
-            "agent_type": {"type": "string", "enum": ["explore", "code", "plan"]},
+            "subagent_type": {"type": "string", "enum": ["Explore", "general-purpose", "Plan"]},
         },
-        "required": ["description", "prompt", "agent_type"],
+        "required": ["description", "prompt", "subagent_type"],
     },
 }
 
@@ -96,8 +96,8 @@ ALL_TOOLS = BASE_TOOLS + [TASK_TOOL]   # Main agent gets Task
 While a subagent runs, progress is shown in-place:
 
 ```sh
-  [explore] find auth files ... 5 tools, 3.2s
-  [explore] find auth files - done (8 tools, 5.1s)
+  [Explore] find auth files ... 5 tools, 3.2s
+  [Explore] find auth files - done (8 tools, 5.1s)
 ```
 
 This gives visibility without polluting the main conversation's context.
@@ -108,15 +108,15 @@ This gives visibility without polluting the main conversation's context.
 User: "Refactor auth to use JWT"
 
 Main Agent:
-  1. Task(explore): "Find all auth-related files"
+  1. Task(Explore): "Find all auth-related files"
      -> Subagent reads 10 files
      -> Returns: "Auth in src/auth/login.py..."
 
-  2. Task(plan): "Design JWT migration"
+  2. Task(Plan): "Design JWT migration"
      -> Subagent analyzes structure
      -> Returns: "1. Add jwt lib 2. Create utils..."
 
-  3. Task(code): "Implement JWT tokens"
+  3. Task(general-purpose): "Implement JWT tokens"
      -> Subagent writes code
      -> Returns: "Created jwt_utils.py, updated login.py"
 
@@ -132,7 +132,7 @@ Three subagents, each with clean context, each returning only a summary.
 | Isolation | Process boundary | Message history |
 | Tools | Same (bash only) | Filtered per type |
 | Communication | stdout capture | Return value |
-| Spawning | `python v0_bash_agent.py "task"` | `Task(type, prompt)` |
+| Spawning | `python v0_bash_agent.py "task"` | `Task(subagent_type, prompt)` |
 | Nesting | Unlimited | One level (no Task tool in subagents) |
 
 ## The Deeper Insight

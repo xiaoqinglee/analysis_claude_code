@@ -58,7 +58,7 @@ def chat(prompt, history=[]):
         results = []
         for b in r.content:
             if b.type == "tool_use":
-                out = subprocess.run(b.input["command"], shell=True, capture_output=True, text=True, timeout=300)
+                out = subprocess.run(b.input["command"], shell=True, capture_output=True, text=True, timeout=120)
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": out.stdout + out.stderr})
         history.append({"role": "user", "content": results})
 
@@ -93,7 +93,7 @@ if __name__ == "__main__":
 
 | 特性 | v0 | v3 |
 |------|----|----|
-| 代理类型 | 无 | explore/code/plan |
+| 代理类型 | 无 | Explore/general-purpose/Plan |
 | 工具过滤 | 无 | 白名单 |
 | 进度显示 | 普通 stdout | 行内更新 |
 | 代码复杂度 | ~50 行 | ~450 行 |

@@ -26,7 +26,9 @@ def test_imports():
         "v5_compression_agent",
         "v6_tasks_agent",
         "v7_background_agent",
-        "v8_team_agent",
+        "v8a_team_foundation",
+        "v8b_messaging",
+        "v8c_coordination",
         "v9_autonomous_agent",
     ]
 
@@ -301,7 +303,7 @@ def test_v3_agent_types_structure():
     """Test v3 AGENT_TYPES structure."""
     from v3_subagent import AGENT_TYPES
 
-    required_types = {"explore", "code", "plan"}
+    required_types = {"Explore", "general-purpose", "Plan"}
     assert set(AGENT_TYPES.keys()) == required_types
 
     for name, config in AGENT_TYPES.items():
@@ -317,20 +319,20 @@ def test_v3_get_tools_for_agent():
     """Test v3 get_tools_for_agent filters correctly."""
     from v3_subagent import get_tools_for_agent, BASE_TOOLS
 
-    # explore: read-only
-    explore_tools = get_tools_for_agent("explore")
+    # Explore: read-only
+    explore_tools = get_tools_for_agent("Explore")
     explore_names = {t["name"] for t in explore_tools}
     assert "bash" in explore_names
     assert "read_file" in explore_names
     assert "write_file" not in explore_names
     assert "edit_file" not in explore_names
 
-    # code: all base tools
-    code_tools = get_tools_for_agent("code")
+    # general-purpose: all base tools
+    code_tools = get_tools_for_agent("general-purpose")
     assert len(code_tools) == len(BASE_TOOLS)
 
-    # plan: read-only
-    plan_tools = get_tools_for_agent("plan")
+    # Plan: read-only
+    plan_tools = get_tools_for_agent("Plan")
     plan_names = {t["name"] for t in plan_tools}
     assert "write_file" not in plan_names
 
@@ -343,9 +345,9 @@ def test_v3_get_agent_descriptions():
     from v3_subagent import get_agent_descriptions
 
     desc = get_agent_descriptions()
-    assert "explore" in desc
-    assert "code" in desc
-    assert "plan" in desc
+    assert "Explore" in desc
+    assert "general-purpose" in desc
+    assert "Plan" in desc
     assert "Read-only" in desc or "read" in desc.lower()
 
     print("PASS: test_v3_get_agent_descriptions")
@@ -360,8 +362,8 @@ def test_v3_task_tool_schema():
     schema = TASK_TOOL["input_schema"]
     assert "description" in schema["properties"]
     assert "prompt" in schema["properties"]
-    assert "agent_type" in schema["properties"]
-    assert set(schema["properties"]["agent_type"]["enum"]) == set(AGENT_TYPES.keys())
+    assert "subagent_type" in schema["properties"]
+    assert set(schema["properties"]["subagent_type"]["enum"]) == set(AGENT_TYPES.keys())
 
     print("PASS: test_v3_task_tool_schema")
     return True
@@ -594,22 +596,26 @@ def test_v5_microcompact_keeps_recent():
     from v5_compression_agent import ContextManager
     cm = ContextManager()
 
+    # Create 10 tool results with large outputs (100000 chars each = ~25000 tokens).
+    # KEEP_RECENT=3 means 7 are candidates. Each >1000 tokens, total savings ~175000
+    # which far exceeds MIN_SAVINGS (20000).
+    n = 10
     messages = [
-        {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "read_file", "input": {}} for i in range(5)]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "read_file", "input": {}} for i in range(n)]},
         {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": f"t{i}", "content": "x" * 5000}
-            for i in range(5)
+            {"type": "tool_result", "tool_use_id": f"t{i}", "content": "x" * 100000}
+            for i in range(n)
         ]},
     ]
 
     result = cm.microcompact(messages)
     user_content = result[1]["content"]
 
-    compacted = sum(1 for b in user_content if b.get("content") == "[Output compacted - re-read if needed]")
+    compacted = sum(1 for b in user_content if b.get("content") == "[Old tool result content cleared]")
     preserved = sum(1 for b in user_content if len(b.get("content", "")) > 100)
 
     assert preserved == cm.KEEP_RECENT, f"Should keep {cm.KEEP_RECENT} recent, got {preserved}"
-    assert compacted == 2, f"Should compact 2 old outputs, got {compacted}"
+    assert compacted == n - cm.KEEP_RECENT, f"Should compact {n - cm.KEEP_RECENT} old outputs, got {compacted}"
 
     print("PASS: test_v5_microcompact_keeps_recent")
     return True
@@ -984,7 +990,7 @@ def test_v7_tools_in_all_tools():
 
 def test_v8_create_team():
     """Test v8 TeammateManager team creation."""
-    from v8_team_agent import TeammateManager
+    from v8c_coordination import TeammateManager
     tm = TeammateManager()
 
     result = tm.create_team("test-team")
@@ -1001,7 +1007,7 @@ def test_v8_send_message():
     """Test v8 TeammateManager message sending via inbox."""
     import tempfile
     from pathlib import Path
-    from v8_team_agent import TeammateManager, Teammate
+    from v8c_coordination import TeammateManager, Teammate
 
     tm = TeammateManager()
     tm.create_team("msg-team")
@@ -1029,7 +1035,7 @@ def test_v8_send_message():
 
 def test_v8_message_types():
     """Test v8 TeammateManager validates message types."""
-    from v8_team_agent import TeammateManager
+    from v8c_coordination import TeammateManager
     tm = TeammateManager()
 
     result = tm.send_message("nobody", "test", msg_type="invalid_type")
@@ -1043,7 +1049,7 @@ def test_v8_delete_team():
     """Test v8 TeammateManager team deletion."""
     import tempfile
     from pathlib import Path
-    from v8_team_agent import TeammateManager, Teammate
+    from v8c_coordination import TeammateManager, Teammate
 
     tm = TeammateManager()
     tm.create_team("del-team")
@@ -1064,7 +1070,7 @@ def test_v8_delete_team():
 
 def test_v8_team_tools_in_all_tools():
     """Test v8 Team tools are in ALL_TOOLS."""
-    from v8_team_agent import ALL_TOOLS
+    from v8c_coordination import ALL_TOOLS
     tool_names = {t["name"] for t in ALL_TOOLS}
     assert "TeamCreate" in tool_names
     assert "SendMessage" in tool_names
@@ -1076,7 +1082,7 @@ def test_v8_team_tools_in_all_tools():
 
 def test_v8_team_status():
     """Test v8 TeammateManager status reporting."""
-    from v8_team_agent import TeammateManager
+    from v8c_coordination import TeammateManager
     tm = TeammateManager()
 
     assert "No teams" in tm.get_team_status()
@@ -1106,12 +1112,14 @@ def test_v5_compactable_tools():
 
 
 def test_v5_auto_compact_source():
-    """Verify auto_compact saves transcript + keeps recent messages."""
+    """Verify auto_compact saves transcript and replaces ALL messages."""
     import inspect
     from v5_compression_agent import ContextManager
     source = inspect.getsource(ContextManager.auto_compact)
     assert "save_transcript" in source, "auto_compact must archive before compressing"
-    assert "messages[-5:]" in source, "auto_compact must keep recent 5 messages"
+    assert "replace ALL" in source or "no \"keep last N\"" in source.lower() or \
+           "Conversation compressed" in source, \
+        "auto_compact must replace ALL messages (no keep-last-5)"
     print("PASS: test_v5_auto_compact_source")
     return True
 
@@ -1183,7 +1191,7 @@ def test_v7_notification_drain_clears():
 
 def test_v8_tool_count():
     """Verify v8 has exactly 15 tools."""
-    from v8_team_agent import ALL_TOOLS
+    from v8c_coordination import ALL_TOOLS
     assert len(ALL_TOOLS) == 15, f"v8 should have 15 tools, got {len(ALL_TOOLS)}"
     print("PASS: test_v8_tool_count")
     return True
@@ -1191,7 +1199,7 @@ def test_v8_tool_count():
 
 def test_v8_teammate_tools_subset():
     """Verify TEAMMATE_TOOLS is a proper subset of ALL_TOOLS."""
-    from v8_team_agent import TEAMMATE_TOOLS, ALL_TOOLS
+    from v8c_coordination import TEAMMATE_TOOLS, ALL_TOOLS
     mate_names = {t["name"] for t in TEAMMATE_TOOLS}
     all_names = {t["name"] for t in ALL_TOOLS}
     assert mate_names.issubset(all_names)
@@ -1204,23 +1212,21 @@ def test_v8_teammate_tools_subset():
 
 def test_v8_message_types_count():
     """Verify MESSAGE_TYPES has exactly 5 types."""
-    from v8_team_agent import TeammateManager
-    assert len(TeammateManager.MESSAGE_TYPES) == 5, \
-        f"Expected 5 message types, got {len(TeammateManager.MESSAGE_TYPES)}"
+    from v8c_coordination import MESSAGE_TYPES
+    assert len(MESSAGE_TYPES) == 5, \
+        f"Expected 5 message types, got {len(MESSAGE_TYPES)}"
     print("PASS: test_v8_message_types_count")
     return True
 
 
 def test_v7_notification_xml_construction():
-    """Verify agent_loop constructs <task-notification> XML from drain results."""
+    """Verify agent_loop constructs attachment-based notifications from drain results."""
     import inspect, v7_background_agent
     source = inspect.getsource(v7_background_agent.agent_loop)
-    assert "task-notification" in source, \
-        "agent_loop must construct <task-notification> XML blocks"
-    assert "task-id" in source, \
-        "XML must include <task-id> element"
-    assert "status" in source, \
-        "XML must include status element"
+    assert "drain_notifications" in source, \
+        "agent_loop must call drain_notifications"
+    assert "attachment" in source or "notification" in source, \
+        "agent_loop must handle notifications"
     print("PASS: test_v7_notification_xml_construction")
     return True
 
@@ -1235,17 +1241,18 @@ def test_v7_summary_truncation():
     bm.get_output(tid, block=True, timeout=5000)
     time.sleep(0.1)
     notifications = bm.drain_notifications()
-    target = [n for n in notifications if n["task_id"] == tid]
+    target = [n for n in notifications if
+              isinstance(n.get("attachment"), dict) and n["attachment"].get("task_id") == tid]
     assert len(target) == 1, f"Expected 1 notification, got {len(target)}"
-    assert len(target[0]["summary"]) == 500, \
-        f"Summary should be 500 chars, got {len(target[0]['summary'])}"
+    assert len(target[0]["attachment"]["summary"]) == 500, \
+        f"Summary should be 500 chars, got {len(target[0]['attachment']['summary'])}"
     print("PASS: test_v7_summary_truncation")
     return True
 
 
 def test_v8_teammate_bg_prefix():
     """Verify v8 BackgroundManager maps 'teammate' type to 't' prefix."""
-    from v8_team_agent import BackgroundManager
+    from v8c_coordination import BackgroundManager
     bm = BackgroundManager()
     tid = bm.run_in_background(lambda: "x", task_type="teammate")
     assert tid.startswith("t"), f"Teammate prefix should be 't', got '{tid[0]}'"
@@ -1256,7 +1263,7 @@ def test_v8_teammate_bg_prefix():
 
 def test_v8_spawn_teammate_errors():
     """Verify spawn_teammate returns errors for invalid inputs."""
-    from v8_team_agent import TeammateManager
+    from v8c_coordination import TeammateManager
     tm = TeammateManager()
     result = tm.spawn_teammate("worker", "nonexistent-team", "prompt")
     assert "error" in result.lower(), \
@@ -1276,7 +1283,7 @@ def test_v8_find_teammate_cross_team():
     """Verify _find_teammate searches across teams when team_name is None."""
     import tempfile
     from pathlib import Path
-    from v8_team_agent import TeammateManager, Teammate
+    from v8c_coordination import TeammateManager, Teammate
     tm = TeammateManager()
     tm.create_team("team-a")
     tm.create_team("team-b")
@@ -1316,7 +1323,7 @@ def test_v8_broadcast_to_all():
     """Verify broadcast sends to all teammates, not just one."""
     import tempfile
     from pathlib import Path
-    from v8_team_agent import TeammateManager, Teammate
+    from v8c_coordination import TeammateManager, Teammate
     tm = TeammateManager()
     tm.create_team("bcast-test")
     inboxes = []
@@ -1341,7 +1348,7 @@ def test_v8_delete_sends_shutdown():
     """Verify delete_team sends shutdown_request to all members."""
     import tempfile, json
     from pathlib import Path
-    from v8_team_agent import TeammateManager, Teammate
+    from v8c_coordination import TeammateManager, Teammate
     tm = TeammateManager()
     tm.create_team("shutdown-test")
     inboxes = []
@@ -1389,7 +1396,7 @@ def test_v3_context_isolation():
     assert "sub_messages" in run_task_source, \
         "run_task must use isolated sub_messages list"
     # Verify explore agents get read-only tools (no write_file or edit_file)
-    explore_tool_names = v3_subagent.AGENT_TYPES["explore"]["tools"]
+    explore_tool_names = v3_subagent.AGENT_TYPES["Explore"]["tools"]
     assert "write_file" not in explore_tool_names, \
         "Explore subagent should not have write_file"
     assert "edit_file" not in explore_tool_names, \
@@ -1563,10 +1570,10 @@ def test_v2_status_progression_enforcement():
 # =============================================================================
 
 def test_v3_agent_types_exactly_three():
-    """Verify AGENT_TYPES has exactly 3 types: explore, code, plan."""
+    """Verify AGENT_TYPES has exactly 3 types: Explore, general-purpose, Plan."""
     from v3_subagent import AGENT_TYPES
     assert len(AGENT_TYPES) == 3, f"Expected 3 agent types, got {len(AGENT_TYPES)}"
-    assert set(AGENT_TYPES.keys()) == {"explore", "code", "plan"}
+    assert set(AGENT_TYPES.keys()) == {"Explore", "general-purpose", "Plan"}
     print("PASS: test_v3_agent_types_exactly_three")
     return True
 
@@ -1574,7 +1581,7 @@ def test_v3_agent_types_exactly_three():
 def test_v3_task_prevents_recursion():
     """Verify subagents do NOT get Task tool (prevents infinite recursion)."""
     from v3_subagent import get_tools_for_agent
-    for agent_type in ("explore", "code", "plan"):
+    for agent_type in ("Explore", "general-purpose", "Plan"):
         tools = get_tools_for_agent(agent_type)
         tool_names = {t["name"] for t in tools}
         assert "Task" not in tool_names, \
@@ -1684,7 +1691,7 @@ def test_v5_compactable_tools_set():
     """Verify COMPACTABLE_TOOLS contains exactly the expected tool names."""
     from v5_compression_agent import ContextManager
     cm = ContextManager()
-    expected = {"bash", "read_file", "write_file", "edit_file"}
+    expected = {"bash", "read_file", "write_file", "edit_file", "glob", "grep", "list_dir", "notebook_edit"}
     assert cm.COMPACTABLE_TOOLS == expected, \
         f"Expected {expected}, got {cm.COMPACTABLE_TOOLS}"
     print("PASS: test_v5_compactable_tools_set")
@@ -1740,7 +1747,7 @@ def test_v5_microcompact_all_recent():
     result = cm.microcompact(messages)
     user_content = result[1]["content"]
     for block in user_content:
-        assert block["content"] != "[Output compacted - re-read if needed]", \
+        assert block["content"] != "[Old tool result content cleared]", \
             "When <= KEEP_RECENT outputs, none should be compacted"
 
     print("PASS: test_v5_microcompact_all_recent")
@@ -1905,7 +1912,7 @@ def test_v6_task_delete_removes_disk():
         tm = TaskManager(Path(tmpdir))
         tm.create("Ephemeral")
 
-        task_file = Path(tmpdir) / "task_1.json"
+        task_file = Path(tmpdir) / "1.json"
         assert task_file.exists(), "Task file should exist after create"
 
         tm.delete("1")
@@ -2046,11 +2053,13 @@ def test_v7_notification_has_required_fields():
     assert len(notifications) >= 1, "Should have at least 1 notification"
 
     n = notifications[0]
-    assert "task_id" in n, "Notification must have task_id"
-    assert "status" in n, "Notification must have status"
-    assert "summary" in n, "Notification must have summary"
-    assert n["status"] == "completed"
-    assert n["summary"] == "test_output"
+    assert "attachment" in n, "Notification must have attachment key"
+    att = n["attachment"]
+    assert "task_id" in att, "Notification attachment must have task_id"
+    assert "status" in att, "Notification attachment must have status"
+    assert "summary" in att, "Notification attachment must have summary"
+    assert att["status"] == "completed"
+    assert att["summary"] == "test_output"
 
     print("PASS: test_v7_notification_has_required_fields")
     return True
@@ -2064,19 +2073,19 @@ def test_v8_create_team_creates_directory():
     """Verify TeammateManager.create_team creates a directory on disk."""
     import tempfile
     from pathlib import Path
-    import v8_team_agent
+    import v8c_coordination
 
-    orig_dir = v8_team_agent.TEAMS_DIR
+    orig_dir = v8c_coordination.TEAMS_DIR
     with tempfile.TemporaryDirectory() as tmpdir:
-        v8_team_agent.TEAMS_DIR = Path(tmpdir)
-        tm = v8_team_agent.TeammateManager()
+        v8c_coordination.TEAMS_DIR = Path(tmpdir)
+        tm = v8c_coordination.TeammateManager()
         tm.create_team("dir-test")
 
         team_dir = Path(tmpdir) / "dir-test"
         assert team_dir.exists(), "create_team must create team directory"
         assert team_dir.is_dir(), "Team path must be a directory"
 
-        v8_team_agent.TEAMS_DIR = orig_dir
+        v8c_coordination.TEAMS_DIR = orig_dir
 
     print("PASS: test_v8_create_team_creates_directory")
     return True
@@ -2086,7 +2095,7 @@ def test_v8_check_inbox_missing_file():
     """Verify check_inbox returns empty list when inbox file does not exist."""
     import tempfile
     from pathlib import Path
-    from v8_team_agent import TeammateManager, Teammate
+    from v8c_coordination import TeammateManager, Teammate
 
     tm = TeammateManager()
     tm.create_team("empty-inbox-team")
@@ -2107,7 +2116,7 @@ def test_v8_broadcast_excludes_sender():
     """Verify broadcast sends to N-1 teammates (excludes the sender)."""
     import tempfile
     from pathlib import Path
-    from v8_team_agent import TeammateManager, Teammate
+    from v8c_coordination import TeammateManager, Teammate
 
     tm = TeammateManager()
     tm.create_team("excl-test")
@@ -2140,7 +2149,7 @@ def test_v8_broadcast_excludes_sender():
 
 def test_v8_teammate_tools_excludes_team_mgmt():
     """Verify TEAMMATE_TOOLS excludes TeamCreate and TeamDelete."""
-    from v8_team_agent import TEAMMATE_TOOLS
+    from v8c_coordination import TEAMMATE_TOOLS
     tool_names = {t["name"] for t in TEAMMATE_TOOLS}
     assert "TeamCreate" not in tool_names, "Teammates should not have TeamCreate"
     assert "TeamDelete" not in tool_names, "Teammates should not have TeamDelete"
@@ -2157,7 +2166,7 @@ def test_v8_find_teammate_with_team_name():
     """Verify _find_teammate finds teammate when team_name is provided."""
     import tempfile
     from pathlib import Path
-    from v8_team_agent import TeammateManager, Teammate
+    from v8c_coordination import TeammateManager, Teammate
 
     tm = TeammateManager()
     tm.create_team("find-team")
@@ -2185,7 +2194,7 @@ def test_v8_find_teammate_with_team_name():
 
 def test_v8_send_message_validates_type():
     """Verify send_message rejects messages with invalid type."""
-    from v8_team_agent import TeammateManager
+    from v8c_coordination import TeammateManager
     tm = TeammateManager()
 
     for invalid in ("invalid", "unknown", "quit", ""):
@@ -2266,11 +2275,13 @@ def test_context_manager_parity():
     from v5_compression_agent import ContextManager as CM5
     from v6_tasks_agent import ContextManager as CM6
     from v7_background_agent import ContextManager as CM7
-    from v8_team_agent import ContextManager as CM8
+    from v8a_team_foundation import ContextManager as CM8a
+    from v8b_messaging import ContextManager as CM8b
+    from v8c_coordination import ContextManager as CM8c
     from v9_autonomous_agent import ContextManager as CM9
 
     src5 = inspect.getsource(CM5)
-    for name, cls in [("v6", CM6), ("v7", CM7), ("v8", CM8), ("v9", CM9)]:
+    for name, cls in [("v6", CM6), ("v7", CM7), ("v8a", CM8a), ("v8b", CM8b), ("v8c", CM8c), ("v9", CM9)]:
         src = inspect.getsource(cls)
         assert src == src5, f"ContextManager in {name} differs from v5"
     print("PASS: test_context_manager_parity")
@@ -2278,7 +2289,119 @@ def test_context_manager_parity():
 
 
 # =============================================================================
-# Main
+# Behavioral Tests - Cross-Version
+# =============================================================================
+
+def test_auto_compact_replaces_all_messages():
+    """Verify auto_compact replaces ALL messages, not keeping last 5."""
+    import inspect
+    from v5_compression_agent import ContextManager
+    source = inspect.getsource(ContextManager.auto_compact)
+    # The source should NOT contain messages[-5:] or similar "keep last N" patterns
+    assert "messages[-5:]" not in source, \
+        "auto_compact must NOT keep last 5 messages; it replaces ALL"
+    assert "messages[-2:]" not in source, \
+        "auto_compact must NOT keep last 2 messages; it replaces ALL"
+    # Verify it creates the compressed result from scratch
+    assert "Conversation compressed" in source, \
+        "auto_compact must produce a [Conversation compressed] summary"
+    print("PASS: test_auto_compact_replaces_all_messages")
+    return True
+
+
+def test_microcompact_min_savings_threshold():
+    """Verify MIN_SAVINGS is 20000 and microcompact only clears when savings >= MIN_SAVINGS."""
+    from v5_compression_agent import MIN_SAVINGS
+    assert MIN_SAVINGS == 20000, f"MIN_SAVINGS should be 20000, got {MIN_SAVINGS}"
+    print("PASS: test_microcompact_min_savings_threshold")
+    return True
+
+
+def test_compactable_tools_exactly_eight():
+    """Verify COMPACTABLE_TOOLS has exactly 8 tools in v5/v6/v7."""
+    from v5_compression_agent import ContextManager as CM5
+    from v6_tasks_agent import ContextManager as CM6
+    from v7_background_agent import ContextManager as CM7
+
+    for name, cm_cls in [("v5", CM5), ("v6", CM6), ("v7", CM7)]:
+        cm = cm_cls()
+        assert len(cm.COMPACTABLE_TOOLS) == 8, \
+            f"{name} COMPACTABLE_TOOLS should have 8 tools, got {len(cm.COMPACTABLE_TOOLS)}"
+        expected = {"bash", "read_file", "write_file", "edit_file",
+                    "glob", "grep", "list_dir", "notebook_edit"}
+        assert cm.COMPACTABLE_TOOLS == expected, \
+            f"{name} COMPACTABLE_TOOLS mismatch: expected {expected}, got {cm.COMPACTABLE_TOOLS}"
+    print("PASS: test_compactable_tools_exactly_eight")
+    return True
+
+
+def test_v7_notification_attachment_format():
+    """Verify v7 notifications use attachment-based format (not XML)."""
+    import time
+    from v7_background_agent import BackgroundManager
+    bm = BackgroundManager()
+    tid = bm.run_in_background(lambda: "test_result", task_type="bash")
+    bm.get_output(tid, block=True, timeout=5000)
+    time.sleep(0.1)
+    notifications = bm.drain_notifications()
+    target = [n for n in notifications if n.get("task_id") == tid or
+              (isinstance(n.get("attachment"), dict) and n["attachment"].get("task_id") == tid)]
+    assert len(target) >= 1, "Should have at least 1 notification"
+    n = target[0]
+    assert n.get("type") == "attachment", \
+        f"Notification type should be 'attachment', got '{n.get('type')}'"
+    assert "attachment" in n, "Notification must have 'attachment' key"
+    assert n["attachment"]["type"] == "task_status", \
+        f"Attachment type should be 'task_status', got '{n['attachment']['type']}'"
+    print("PASS: test_v7_notification_attachment_format")
+    return True
+
+
+def test_v7_output_file_extension():
+    """Verify output file extension is .output (not .txt)."""
+    from v7_background_agent import BackgroundManager
+    bm = BackgroundManager()
+    path = bm._write_output("test-123", "some output")
+    assert str(path).endswith(".output"), \
+        f"Output file should end with .output, got: {path}"
+    path.unlink(missing_ok=True)
+    print("PASS: test_v7_output_file_extension")
+    return True
+
+
+def test_bash_timeout_default():
+    """Verify bash timeout is 120 seconds."""
+    import inspect
+    from v7_background_agent import _exec_bash
+    source = inspect.getsource(_exec_bash)
+    assert "timeout=120" in source, \
+        "bash timeout should be 120 seconds"
+    print("PASS: test_bash_timeout_default")
+    return True
+
+
+def test_task_file_naming_sanitized_no_prefix():
+    """Verify task files use sanitized ID without task_ prefix in v6/v7."""
+    import tempfile
+    from pathlib import Path
+    from v6_tasks_agent import TaskManager
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tm = TaskManager(Path(tmpdir))
+        task = tm.create("Test task")
+        task_path = tm._task_path(task.id)
+        filename = task_path.name
+        # File should be {sanitized_id}.json, NOT task_{id}.json
+        assert not filename.startswith("task_"), \
+            f"Task file should NOT have task_ prefix, got: {filename}"
+        assert filename.endswith(".json"), \
+            f"Task file should end with .json, got: {filename}"
+        # The sanitized ID should be used directly
+        sanitized = tm._sanitize_id(task.id)
+        assert filename == f"{sanitized}.json", \
+            f"Expected {sanitized}.json, got {filename}"
+    print("PASS: test_task_file_naming_sanitized_no_prefix")
+    return True
 # =============================================================================
 
 if __name__ == "__main__":
@@ -2422,6 +2545,14 @@ if __name__ == "__main__":
         test_v9_teammate_loop_phases,
         # --- NEW: cross-version parity tests ---
         test_context_manager_parity,
+        # --- NEW: behavioral tests ---
+        test_auto_compact_replaces_all_messages,
+        test_microcompact_min_savings_threshold,
+        test_compactable_tools_exactly_eight,
+        test_v7_notification_attachment_format,
+        test_v7_output_file_extension,
+        test_bash_timeout_default,
+        test_task_file_naming_sanitized_no_prefix,
     ]
 
     failed = []

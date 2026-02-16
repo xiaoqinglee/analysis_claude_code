@@ -94,6 +94,16 @@ IDLE_REASONS = {
 }
 ```
 
+## Production vs Teaching Simplification
+
+| Aspect | Production cli.js | Our Teaching Version |
+|--------|------------------|---------------------|
+| Idle mechanism | Passive turn-level idle (agent waits for input injection) | Active polling loop (sleep 1s, check inbox/board) |
+| Auto-claiming | Prompt-driven (model calls TaskList + TaskUpdate) | Code-driven (`_scan_unclaimed_tasks()` in idle loop) |
+| Identity injection | Handled by system attachment pipeline | Explicit re-injection after `auto_compact` |
+
+The teaching version uses active polling to make the idle/wake pattern explicit and observable. Production achieves the same effect through turn-level event injection.
+
 ## The Full Teammate Loop
 
 ```python
@@ -126,11 +136,14 @@ def _teammate_loop(self, teammate, initial_prompt):
 
         # === Idle phase: wait for new messages or unclaimed tasks ===
         teammate.status = "idle"
+        teammate.idle_reason = IDLE_REASONS["no_tool_use"]
 
-        for _ in range(60):  # 60 checks x 1s = 60s
+        polls = IDLE_TIMEOUT // IDLE_POLL_INTERVAL
+        for _ in range(polls):  # 60 checks x 1s = 60s
             if teammate.status == "shutdown":
                 return
 
+            teammate.idle_reason = IDLE_REASONS["awaiting_messages"]
             new_messages = self.check_inbox(teammate.name, teammate.team_name)
             if new_messages:
                 if any(m.get("type") == "shutdown_request" for m in new_messages):
@@ -138,6 +151,7 @@ def _teammate_loop(self, teammate, initial_prompt):
                 sub_messages.append({"role": "user", "content": format(new_messages)})
                 break
 
+            teammate.idle_reason = IDLE_REASONS["awaiting_tasks"]
             unclaimed = [t for t in TASK_MGR.list_all()
                          if t.status == "pending" and not t.owner and not t.blocked_by]
             if unclaimed:
@@ -148,7 +162,11 @@ def _teammate_loop(self, teammate, initial_prompt):
                 })
                 break
 
-            time.sleep(1)
+            time.sleep(IDLE_POLL_INTERVAL)
+        else:
+            # IDLE_TIMEOUT expired with no new work
+            teammate.idle_reason = IDLE_REASONS["timeout"]
+            return
 ```
 
 ## Auto-Claiming Tasks
@@ -164,6 +182,8 @@ if unclaimed:
 ```
 
 First-come-first-served by task ID. The thread lock in `TaskManager.update()` prevents race conditions when multiple teammates try to claim the same task.
+
+In production, auto-claiming is prompt-driven: the model is instructed to call TaskList and TaskUpdate itself. Our code-level implementation makes the concept explicit for teaching purposes.
 
 ## Identity Preservation After Compression
 
@@ -218,7 +238,7 @@ v4: One agent, with domain knowledge
 v5: One agent, can forget and keep working
 v6: Multiple agents, with a shared board
 v7: Multiple agents, working in parallel
-v8: Multiple agents, communicating
+v8: Multiple agents, communicating (v8a foundation -> v8b messaging -> v8c coordination)
 v9: Multiple agents, self-organizing
 ```
 

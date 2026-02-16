@@ -245,30 +245,30 @@ def test_v9_dependency_chain():
     return True
 
 
-def test_v9_vs_v8_loop_difference():
-    """Verify v9 has idle phase and identity re-injection that v8 does not."""
-    from v8_team_agent import TeammateManager as V8TM
+def test_v9_vs_v8c_loop_difference():
+    """Verify v9 has idle phase and identity re-injection that v8c does not."""
+    from v8c_coordination import TeammateManager as V8CTM
 
-    v8_source = inspect.getsource(V8TM._teammate_loop)
+    v8c_source = inspect.getsource(V8CTM._teammate_loop)
     v9_loop_source = inspect.getsource(TeammateManager._teammate_loop)
     v9_idle_source = inspect.getsource(TeammateManager._idle_phase)
 
-    # v8 never has idle_phase, v9 does
-    assert "_idle_phase" not in v8_source, \
-        "v8 should NOT call _idle_phase"
+    # v8c never has idle_phase, v9 does
+    assert "_idle_phase" not in v8c_source, \
+        "v8c should NOT call _idle_phase"
     assert "_idle_phase" in v9_loop_source or "idle" in v9_loop_source, \
         "v9 MUST reference idle phase"
 
     # v9's _idle_phase sets status to "idle"
     assert '"idle"' in v9_idle_source, "v9 _idle_phase MUST set status to 'idle'"
 
-    # v9 has identity re-injection, v8 does not
-    v8_has_reinject = "_reinject_identity" in v8_source
+    # v9 has identity re-injection, v8c does not
+    v8c_has_reinject = "_reinject_identity" in v8c_source
     v9_has_reinject = "_reinject_identity" in v9_loop_source
-    assert not v8_has_reinject, "v8 should NOT have identity re-injection"
+    assert not v8c_has_reinject, "v8c should NOT have identity re-injection"
     assert v9_has_reinject, "v9 MUST have identity re-injection"
 
-    print("PASS: test_v9_vs_v8_loop_difference")
+    print("PASS: test_v9_vs_v8c_loop_difference")
     return True
 
 
@@ -723,7 +723,7 @@ if __name__ == "__main__":
         test_v9_broadcast_excludes_sender,
         test_v9_task_manager_thread_safety,
         test_v9_dependency_chain,
-        test_v9_vs_v8_loop_difference,
+        test_v9_vs_v8c_loop_difference,
         test_v9_system_prompt_mentions_autonomous,
         # v9 constant tests
         test_idle_poll_interval_default,

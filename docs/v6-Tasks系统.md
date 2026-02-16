@@ -65,7 +65,7 @@ class Task:
     +------------------------------------+
                   (重新打开)
 
-  任何状态 ---> deleted (永久删除)
+  任何状态 ---> deleted (文件从磁盘物理删除)
 ```
 
 当任务转为 `completed` 时，依赖它的任务的 `blocked_by` 列表会自动更新。
@@ -142,18 +142,22 @@ TaskUpdate: id=3, addBlockedBy=["1","2"] # 测试依赖两者
 ## 持久化
 
 ```python
+def _task_path(self, task_id):
+    return self.tasks_dir / f"{self._sanitize_id(task_id)}.json"
+
 def save_task(task):
-    """文件级锁保证并发安全"""
-    path = f"tasks/{task.id}.json"
-    with FileLock(path + ".lock"):
-        with open(path, 'w') as f:
-            json.dump(task.to_dict(), f)
+    """线程锁保证并发安全（生产环境使用文件锁 proper-lockfile）"""
+    path = self._task_path(task.id)
+    path.write_text(json.dumps(asdict(task), indent=2))
 ```
+
+任务 ID 经过清洗（非字母数字字符替换为 `-`）作为文件名。例如 ID `"1"` 变为 `1.json`。
 
 为什么用文件而不是数据库？
 - 每个任务一个文件 = 细粒度锁
 - 子代理可能在不同进程中
 - JSON 文件人类可读，方便调试
+- 任务列表 ID 解析顺序：`CLAUDE_CODE_TASK_LIST_ID` 环境变量 > `CLAUDE_TEAM_NAME` 环境变量 > `"default"` 回退
 
 ## 与压缩的协作 (v5)
 

@@ -18,13 +18,13 @@ Main Thread           Background Thread        Notification Queue
     +-- run_in_bg() ------> |                        |
     |   (returns task_id)   |                        |
     |                       +-- execute fn() ------> |
-    |                       +-- on complete -------> queue.put()
+    |                       +-- on complete -------> queue.put(attachment)
     |                                                |
     +-- drain_notifications() <----------------------+
-    +-- inject <task-notification> XML
+    +-- inject attachment format notification
 ```
 
-主线程发起后台任务后立即继续工作。后台线程完成时将通知推入队列，主线程在下一轮 API 调用前排空队列并注入 XML 通知。
+主线程发起后台任务后立即继续工作。后台线程完成时将通知以 attachment 格式推入队列，主线程在下一轮 API 调用前排空队列并注入通知。
 
 ## 解法：后台执行 + 通知
 
@@ -85,11 +85,19 @@ def wrapper():
         bg_task.output = f"Error: {e}"
         bg_task.status = "error"      # 错误被捕获，不会传播
     finally:
+        output_path = self._write_output(task_id, bg_task.output)
         bg_task.event.set()           # 总是发出完成信号
-        notifications.put({           # 总是推送通知
-            "task_id": task_id,
-            "status": bg_task.status,
-            "summary": bg_task.output[:500],
+        # 匹配 cli.js attachment pipeline 的通知格式
+        notifications.put({
+            "type": "attachment",
+            "attachment": {
+                "type": "task_status",
+                "task_id": task_id,
+                "task_type": bg_task.task_type,
+                "status": bg_task.status,
+                "summary": bg_task.output[:500],
+                "output_file": str(output_path),
+            },
         })
 ```
 
@@ -140,79 +148,43 @@ TaskStop(task_id="a3f7c2")
 
 ## 通知排空/注入循环
 
-通知 Bus 基于 `queue.Queue` 实现。主 Agent 循环在每次 API 调用前执行**排空并注入**循环：
+通知 Bus 基于 `queue.Queue` 实现。主 Agent 循环在每次 API 调用前执行**排空并注入**循环。通知使用匹配 cli.js 的 attachment 格式：
 
 ```python
 # 1. 排空：从队列中拉取所有待处理通知
 notifications = BG.drain_notifications()
 
-# 2. 格式化：转换为 XML 块（共 6 个标签）
-notif_text = "\n".join(
-    f"<task-notification>\n"
-    f"  <task-id>{n['task_id']}</task-id>\n"
-    f"  <task-type>{n.get('task_type', 'unknown')}</task-type>\n"
-    f"  <status>{n['status']}</status>\n"
-    f"  <summary>{n['summary']}</summary>\n"
-    f"  <output-file>{n.get('output_file', '')}</output-file>\n"
-    f"</task-notification>"
-    for n in notifications
-)
-
-# 3. 注入：追加到最后一条用户消息（或创建新消息）
-if messages[-1]["role"] == "user":
-    messages[-1]["content"] += "\n\n" + notif_text
-else:
-    messages.append({"role": "user", "content": notif_text})
+# 2. 注入：作为 attachment 对象追加到最后一条用户消息
+# 每条通知已经是 attachment 格式：
+# {"type": "attachment", "attachment": {"type": "task_status", ...}}
+if notifications:
+    if messages[-1]["role"] == "user":
+        content = messages[-1]["content"]
+        if isinstance(content, list):
+            content.extend(notifications)
+        else:
+            messages[-1]["content"] = [{"type": "text", "text": content}] + notifications
+    else:
+        messages.append({"role": "user", "content": notifications})
 ```
 
 模型将通知视为会话上下文中的结构化 XML 块，然后决定是通过 `TaskOutput` 获取完整输出还是基于摘要继续工作。
 
-## 通知 XML 协议
-
-后台任务完成时，通知自动注入主 Agent 的下一轮对话。XML 包含 6 个标签：
-
-```xml
-<task-notification>
-  <task-id>a3f7c2</task-id>
-  <task-type>local_agent</task-type>
-  <status>completed</status>
-  <summary>Found 3 authentication-related files in src/auth/...</summary>
-  <output-file>.task_outputs/a3f7c2.txt</output-file>
-</task-notification>
-```
-
-| 标签 | 用途 |
-|------|------|
-| `task-notification` | 包裹元素 |
-| `task-id` | 带类型前缀的唯一 ID (b/a/t) |
-| `task-type` | `local_bash`、`local_agent` 或 `in_process_teammate` |
-| `status` | `completed`、`error` 或 `stopped` |
-| `summary` | 输出前 500 个字符，用于快速判断 |
-| `output-file` | 完整输出在磁盘上的路径 |
-
-## 不可编辑队列模式
-
-通知 XML 块被标记为不可编辑：
-
-```python
-NON_EDITABLE_MODES = {"task-notification"}
-
-def is_editable(mode: str) -> bool:
-    return mode not in NON_EDITABLE_MODES
-```
-
-这防止模型尝试修改注入的通知文本。通知是只读的结构化数据，不属于可编辑的对话流。
-
 ## 输出文件系统
 
-后台任务的输出保存到磁盘 `.task_outputs/{task_id}.txt`：
+后台任务的输出保存到磁盘 `.task_outputs/{task_id}.output`：
 
 ```python
 OUTPUT_DIR = WORKDIR / ".task_outputs"
 
-def _save_output(self, task_id, output):
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    (OUTPUT_DIR / f"{task_id}.txt").write_text(output)
+def _write_output(self, task_id, content):
+    # cli.js jSA=32000 默认值，可通过 TASK_MAX_OUTPUT_LENGTH 环境变量配置到 160000
+    max_output_chars = int(os.getenv("TASK_MAX_OUTPUT_LENGTH", "32000"))
+    path = OUTPUT_DIR / f"{task_id}.output"
+    truncated = content[:max_output_chars]
+    with open(path, "a") as f:
+        f.write(truncated)
+    return path
 ```
 
 这有两个目的：
@@ -232,7 +204,7 @@ def _save_output(self, task_id, output):
   (三个任务并行执行)
 
   4. TaskOutput("a1c4e9", block=True)  -> 等待并获取结果
-  5. <task-notification> b5e8f1 completed   (ESLint 在等待期间完成)
+  5. attachment 通知: b5e8f1 completed   (ESLint 在等待期间完成)
   6. TaskOutput("a7b2d3", block=True)  -> 获取第二个结果
   7. 综合三个结果给出报告
 ```

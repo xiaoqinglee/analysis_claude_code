@@ -266,17 +266,22 @@ SKILLS = SkillLoader(SKILLS_DIR)
 # =============================================================================
 
 AGENT_TYPES = {
-    "explore": {
+    # Explore: Read-only agent for searching and analyzing
+    # Production gives Explore all tools except Task/Edit/Write/NotebookEdit
+    "Explore": {
         "description": "Read-only agent for exploring code, finding files, searching",
         "tools": ["bash", "read_file"],
         "prompt": "You are an exploration agent. Search and analyze, but never modify files. Return a concise summary.",
     },
-    "code": {
+    # general-purpose: Full-powered agent for implementation
+    "general-purpose": {
         "description": "Full agent for implementing features and fixing bugs",
         "tools": "*",
         "prompt": "You are a coding agent. Implement the requested changes efficiently.",
     },
-    "plan": {
+    # Plan: Analysis agent for design work
+    # Production gives Plan all tools except Task/Edit/Write/NotebookEdit
+    "Plan": {
         "description": "Planning agent for designing implementation strategies",
         "tools": ["bash", "read_file"],
         "prompt": "You are a planning agent. Analyze the codebase and output a numbered implementation plan. Do NOT make changes.",
@@ -460,12 +465,12 @@ TASK_TOOL = {
                 "type": "string",
                 "description": "Detailed instructions for the subagent"
             },
-            "agent_type": {
+            "subagent_type": {
                 "type": "string",
                 "enum": list(AGENT_TYPES.keys())
             },
         },
-        "required": ["description", "prompt", "agent_type"],
+        "required": ["description", "prompt", "subagent_type"],
     },
 }
 
@@ -489,6 +494,10 @@ detailed instructions and access to resources.""",
             "skill": {
                 "type": "string",
                 "description": "Name of the skill to load"
+            },
+            "args": {
+                "type": "string",
+                "description": "Optional arguments for the skill"
             }
         },
         "required": ["skill"],
@@ -525,7 +534,7 @@ def run_bash(cmd: str) -> str:
     try:
         r = subprocess.run(
             cmd, shell=True, cwd=WORKDIR,
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=120
         )
         return ((r.stdout + r.stderr).strip() or "(no output)")[:50000]
     except Exception as e:
@@ -575,7 +584,7 @@ def run_todo(items: list) -> str:
         return f"Error: {e}"
 
 
-def run_skill(skill_name: str) -> str:
+def run_skill(skill_name: str, args: str = None) -> str:
     """
     Load a skill and inject it into the conversation.
 
@@ -598,29 +607,30 @@ def run_skill(skill_name: str) -> str:
         return f"Error: Unknown skill '{skill_name}'. Available: {available}"
 
     # Wrap in tags so model knows it's skill content
-    return f"""<skill-loaded name="{skill_name}">
+    args_attr = f' args="{args}"' if args else ""
+    return f"""<skill-loaded name="{skill_name}"{args_attr}>
 {content}
 </skill-loaded>
 
 Follow the instructions in the skill above to complete the user's task."""
 
 
-def run_task(description: str, prompt: str, agent_type: str) -> str:
+def run_task(description: str, prompt: str, subagent_type: str) -> str:
     """Execute a subagent task with isolated context and filtered tools."""
-    if agent_type not in AGENT_TYPES:
-        return f"Error: Unknown agent type '{agent_type}'"
+    if subagent_type not in AGENT_TYPES:
+        return f"Error: Unknown agent type '{subagent_type}'"
 
-    config = AGENT_TYPES[agent_type]
-    sub_system = f"""You are a {agent_type} subagent at {WORKDIR}.
+    config = AGENT_TYPES[subagent_type]
+    sub_system = f"""You are a {subagent_type} subagent at {WORKDIR}.
 
 {config["prompt"]}
 
 Complete the task and return a clear, concise summary."""
 
-    sub_tools = get_tools_for_agent(agent_type)
+    sub_tools = get_tools_for_agent(subagent_type)
     sub_messages = [{"role": "user", "content": prompt}]
 
-    print(f"  [{agent_type}] {description}")
+    print(f"  [{subagent_type}] {description}")
     start = time.time()
     tool_count = 0
 
@@ -650,7 +660,7 @@ Complete the task and return a clear, concise summary."""
 
             elapsed = time.time() - start
             sys.stdout.write(
-                f"\r  [{agent_type}] {description} ... {tool_count} tools, {elapsed:.1f}s"
+                f"\r  [{subagent_type}] {description} ... {tool_count} tools, {elapsed:.1f}s"
             )
             sys.stdout.flush()
 
@@ -659,7 +669,7 @@ Complete the task and return a clear, concise summary."""
 
     elapsed = time.time() - start
     sys.stdout.write(
-        f"\r  [{agent_type}] {description} - done ({tool_count} tools, {elapsed:.1f}s)\n"
+        f"\r  [{subagent_type}] {description} - done ({tool_count} tools, {elapsed:.1f}s)\n"
     )
 
     for block in response.content:
@@ -682,9 +692,9 @@ def execute_tool(name: str, args: dict) -> str:
     if name == "TodoWrite":
         return run_todo(args["items"])
     if name == "Task":
-        return run_task(args["description"], args["prompt"], args["agent_type"])
+        return run_task(args["description"], args["prompt"], args["subagent_type"])
     if name == "Skill":
-        return run_skill(args["skill"])
+        return run_skill(args["skill"], args.get("args"))
     return f"Unknown tool: {name}"
 
 

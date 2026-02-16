@@ -2,7 +2,7 @@
 import subprocess
 import sys
 
-SESSIONS = ["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"]
+SESSIONS = ["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8a", "v8b", "v8c", "v9", "unit"]
 
 failed = []
 for session in SESSIONS:

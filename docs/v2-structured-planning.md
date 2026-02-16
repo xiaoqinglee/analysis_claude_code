@@ -35,6 +35,8 @@ The `activeForm` field is the present tense form shown when a task is active (e.
 
 ## TodoManager
 
+Production uses TaskCreate/TaskUpdate (TodoWrite is legacy).
+
 ```python
 class TodoManager:
     def update(self, items: list) -> str:

@@ -85,6 +85,7 @@ MODEL = os.getenv("MODEL_ID", "claude-sonnet-4-5-20250929")
 # TodoManager - The core addition in v2
 # =============================================================================
 
+# Production uses TaskCreate/TaskUpdate (TodoWrite is legacy)
 class TodoManager:
     """
     Manages a structured task list with enforced constraints.
@@ -330,7 +331,7 @@ def run_bash(cmd: str) -> str:
     try:
         result = subprocess.run(
             cmd, shell=True, cwd=WORKDIR,
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=120
         )
         output = (result.stdout + result.stderr).strip()
         return output[:50000] if output else "(no output)"

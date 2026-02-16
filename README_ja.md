@@ -73,11 +73,17 @@
 [v7: Background Agent] -----> 「待たない、作業を続ける」
     |                          +BackgroundManager、約1142行
     v
-[v8: Team Agent] -----------> 「通信するチームメイト」
-    |                          +TeammateManager、約1553行
+[v8a: Team Foundation] --> 「チームメイトの作成と管理」
+    |                       +TeammateManager、約1395行
+    v
+[v8b: Messaging] --------> 「通信するチームメイト」
+    |                       +SendMessage/Inbox、約1557行
+    v
+[v8c: Coordination] -----> 「共有タスクボードとシャットダウンプロトコル」
+    |                       +SharedBoard/Protocol、約1612行
     v
 [v9: Autonomous Agent] -----> 「自己組織化するチーム」
-                               +アイドルサイクル、約1657行
+                               +アイドルサイクル、約1683行
 ```
 
 **おすすめの学習方法：**
@@ -89,14 +95,14 @@
 6. v5でコンテキスト管理と圧縮を学ぶ
 7. v6で永続的なタスク追跡を探求する
 8. v7で並列バックグラウンド実行を理解する
-9. v8でチームのライフサイクルとメッセージングを学ぶ
-      a. TeammateManagerから始める（作成、削除、設定）
-      b. メッセージプロトコルを理解する（5種類、JSONL受信箱）
-      c. Teammateループを学ぶ（簡略版: 作業 -> 受信箱確認 -> 終了）
-      d. 完全なライフサイクルを追跡する: TeamCreate -> spawn -> message -> TeamDelete
+9. v8a/v8b/v8cでチームのライフサイクルとメッセージングを学ぶ
+      a. v8a - TeammateManager（作成、削除、設定、ツールスコーピング）
+      b. v8b - メッセージプロトコル（5種類、JSONL受信箱、受信箱ルーティング）
+      c. v8c - 共有タスクボード、シャットダウンプロトコル、プラン承認
+      d. v8a -> v8b -> v8cの完全なライフサイクルを追跡する
 10. v9で自律的なマルチエージェント協調をマスターする
 
-**注意:** v7からv8は最大のバージョンジャンプ（+411行、36%増加）です。v8はチームライフサイクル、メッセージプロトコル、受信箱アーキテクチャを一度に導入します。上記のサブステップアプローチ（9a-9d）を強く推奨します。
+**注意:** v8は3つの段階的なサブバージョン（v8a -> v8b -> v8c）に分割されており、各バージョンで1つの概念を追加します。これにより、v7からの移行がより緩やかになります。
 
 ## 学習の進行
 
@@ -105,9 +111,9 @@ v0(196) -> v1(417) -> v2(531) -> v3(623) -> v4(783)
    |          |          |          |          |
  Bash      4 Tools    Planning   Subagent   Skills
 
--> v5(896) -> v6(1075) -> v7(1142) -> v8(1553) -> v9(1657)
-     |           |            |           |           |
- Compress     Tasks      Background    Teams     Autonomous
+-> v5(896) -> v6(1075) -> v7(1142) -> v8a(1395) -> v8b(1557) -> v8c(1612) -> v9(1683)
+     |           |            |            |            |            |            |
+ Compress     Tasks      Background   Foundation   Messaging   Coordination  Autonomous
 ```
 
 ## クイックスタート
@@ -133,7 +139,9 @@ python v4_skills_agent.py       # + Skills
 python v5_compression_agent.py  # + コンテキスト圧縮
 python v6_tasks_agent.py        # + タスクシステム
 python v7_background_agent.py   # + バックグラウンドタスク
-python v8_team_agent.py         # + チーム通信
+python v8a_team_foundation.py  # + チーム基盤
+python v8b_messaging.py        # + チーム通信
+python v8c_coordination.py     # + チーム協調
 python v9_autonomous_agent.py  # + 自律チーム
 ```
 
@@ -147,7 +155,7 @@ python tests/run_all.py
 python tests/test_unit.py
 
 # 特定バージョンのテストを実行
-python -m pytest tests/test_v8.py -v
+python -m pytest tests/test_v8a.py tests/test_v8b.py tests/test_v8c.py -v
 ```
 
 ## コアパターン
@@ -177,8 +185,10 @@ while True:
 | [v5](./v5_compression_agent.py) | ~896 | +ContextManager | 3層圧縮 | 忘却が無限作業を可能にする |
 | [v6](./v6_tasks_agent.py) | ~1075 | +TaskCreate/Get/Update/List | 永続タスク | 付箋からカンバンへ |
 | [v7](./v7_background_agent.py) | ~1142 | +TaskOutput/TaskStop | バックグラウンド実行 | 直列から並列へ |
-| [v8](./v8_team_agent.py) | ~1553 | +TeamCreate/SendMessage/TeamDelete | チーム通信 | 命令から協調へ |
-| [v9](./v9_autonomous_agent.py) | ~1657 | +アイドルサイクル/自動割当 | 自律チーム | 協調から自己組織化へ |
+| [v8a](./v8a_team_foundation.py) | ~1395 | +TeamCreate/TeamDelete | チーム基盤 | チーム構造の構築 |
+| [v8b](./v8b_messaging.py) | ~1557 | +SendMessage/Inbox | チーム通信 | 通信チャネル |
+| [v8c](./v8c_coordination.py) | ~1612 | +SharedBoard/Protocol | チーム協調 | 命令から協調へ |
+| [v9](./v9_autonomous_agent.py) | ~1683 | +アイドルサイクル/自動割当 | 自律チーム | 協調から自己組織化へ |
 
 ## サブメカニズムガイド
 
@@ -201,11 +211,12 @@ while True:
 | **バックグラウンド実行** | v7 | `BackgroundManager.run_in_background()` | スレッドベース、即座にtask_id返却 |
 | **IDプレフィックス規約** | v7 | `_PREFIXES` | `b`=bash, `a`=agent（v8で`t`=teammate追加） |
 | **通知バス** | v7 | `drain_notifications()` | 各API呼び出し前にキューをドレイン |
-| **通知注入** | v7 | `<task-notification>` XML | 最後のユーザーメッセージに注入 |
-| **チームメイトライフサイクル** | v8 | `_teammate_loop()` | active -> 作業 -> 受信箱確認 -> 終了 |
-| **ファイルベース受信箱** | v8 | `send_message()/check_inbox()` | JSONL形式、チームメイトごとのファイル |
-| **メッセージプロトコル** | v8 | `MESSAGE_TYPES` | 5種: message, broadcast, shutdown_req/resp, plan_approval |
-| **ツールスコーピング** | v8 | `TEAMMATE_TOOLS` | チームメイトは9ツール（TeamCreate/Delete なし） |
+| **通知注入** | v7 | attachment-based notification | 最後のユーザーメッセージに注入 |
+| **チームメイトライフサイクル** | v8a | `_teammate_loop()` | active -> 作業 -> 受信箱確認 -> 終了 |
+| **ツールスコーピング** | v8a | `TEAMMATE_TOOLS` | チームメイトは9ツール（TeamCreate/Delete なし） |
+| **ファイルベース受信箱** | v8b | `send_message()/check_inbox()` | JSONL形式、チームメイトごとのファイル |
+| **メッセージプロトコル** | v8b | `MESSAGE_TYPES` | 5種: message, broadcast, shutdown_req/resp, plan_approval |
+| **シャットダウンプロトコル** | v8c | `SharedBoard/Protocol` | 優雅なシャットダウンとプラン承認 |
 | **アイドルサイクル** | v9 | `_teammate_loop()` | active -> idle -> 受信箱ポーリング -> 起動 -> active |
 | **タスククレーミング** | v9 | `_teammate_loop()` | アイドルのチームメイトが未割当タスクを自動取得 |
 | **アイデンティティ保持** | v9 | `auto_compact` + identity | 圧縮後にチームメイト名/役割を再注入 |
@@ -223,8 +234,10 @@ learn-claude-code/
 |-- v5_compression_agent.py   # ~896行: + ContextManager、3層圧縮
 |-- v6_tasks_agent.py         # ~1075行: + TaskManager、依存関係付きCRUD
 |-- v7_background_agent.py    # ~1142行: + BackgroundManager、並列実行
-|-- v8_team_agent.py          # ~1553行: + TeammateManager、チーム通信
-|-- v9_autonomous_agent.py    # ~1657行: + アイドルサイクル、自動割当、アイデンティティ保持
+|-- v8a_team_foundation.py  # ~1395行: + TeammateManager、チームライフサイクル
+|-- v8b_messaging.py        # ~1557行: + SendMessage、受信箱、メッセージプロトコル
+|-- v8c_coordination.py     # ~1612行: + 共有タスクボード、シャットダウンプロトコル
+|-- v9_autonomous_agent.py    # ~1683行: + アイドルサイクル、自動割当、アイデンティティ保持
 |-- skills/                   # サンプルSkills（pdf, code-review, mcp-builder, agent-builder）
 |-- docs/                     # 技術ドキュメント（EN + ZH + JA）
 |-- articles/                 # ブログ形式の記事（ZH）
